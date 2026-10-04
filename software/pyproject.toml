@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triniscan"
+version = "0.2.0"
+description = "TriniScan — 激光三角测量三维体积测量系统（全国大学生光电设计竞赛赛题二）"
+readme = "../README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "TriniScan Team" }]
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.10",
+    "open3d>=0.17",
+    "trimesh>=3.23",
+    "pyserial>=3.5",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+ui = ["PyQt5>=5.15"]
+dev = ["pytest>=7.0", "black", "isort", "ruff"]
+
+[project.scripts]
+triniscan = "triniscan.core.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["triniscan*"]
+
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 79
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 79
+
+[tool.ruff]
+line-length = 79
+target-version = "py310"
+select = ["E", "F", "W", "I", "N", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

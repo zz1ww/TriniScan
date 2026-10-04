@@ -81,18 +81,21 @@ TriniScan/
 │   └── mcu/                     单片机代码（转台控制 + 同步触发）
 │
 ├── software/                    上位机软件（Python）
+│   ├── pyproject.toml           包定义 / 工具链 / 依赖
+│   ├── requirements.txt         依赖清单
 │   ├── triniscan/               主程序包
+│   │   ├── common/              通用基础层（几何/IO/日志）
 │   │   ├── camera/              相机采集
 │   │   ├── turntable/           转台通信控制
 │   │   ├── calibration/         相机/激光/转轴标定
-│   │   ├── extraction/          激光中心线提取
+│   │   ├── extraction/          激光中心线提取（Steger/灰度重心）
 │   │   ├── reconstruction/      三角测量 + 点云配准/重建
 │   │   ├── volume/              网格封闭 + 体积计算
-│   │   ├── core/                主控状态机 + 配置
+│   │   ├── core/                主控流程 + 配置 + CLI
+│   │   ├── tools/               一键标定 / 提取预览工具
 │   │   └── ui/                  图形界面
 │   ├── config/                  参数配置文件
-│   ├── tools/                   独立工具脚本
-│   └── tests/                   测试
+│   └── tests/                   单元测试（47 用例）
 │
 ├── assets/
 │   ├── calibration_targets/     标定靶（棋盘格等）
@@ -175,7 +178,17 @@ pip install -r software/requirements.txt
 ### 3. 运行
 
 ```bash
-python -m triniscan.core.main --config software/config/default.yaml
+# 项目根目录下
+set PYTHONPATH=software            # Windows
+python -m triniscan --check        # 检查配置与标定
+python -m triniscan                # 执行测量
+```
+
+### 4. 测试
+
+```bash
+cd software
+PYTHONPATH=. python -m pytest tests/ -v
 ```
 
 ---
@@ -184,6 +197,7 @@ python -m triniscan.core.main --config software/config/default.yaml
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
+| 0 | 项目框架 + 文档 + 单元测试 | ✅ |
 | 1 | 硬件搭建 + "转-停-拍"打通 | ⬜ |
 | 2 | 相机标定 + 激光平面标定 | ⬜ |
 | 3 | 单视角剖面三维点云 | ⬜ |
@@ -191,6 +205,23 @@ python -m triniscan.core.main --config software/config/default.yaml
 | 5 | 网格封闭化 + 体积计算 | ⬜ |
 | 6 | 全流程自动化（≤60s） | ⬜ |
 | 7 | 误差分析 + 海报 + 成本清单 | ⬜ |
+
+### 代码实现状态
+
+| 模块 | 状态 |
+|---|---|
+| 通用几何/IO/日志 | ✅ 完整实现 + 测试 |
+| 相机采集 / 转台控制 | ✅ 完整实现 |
+| 相机内参标定 | ✅ 完整实现 + 测试 |
+| **激光平面标定** | ✅ 完整实现 + 测试 |
+| 转轴标定 | ✅ 完整实现 + 测试 |
+| **中心线提取（Steger）** | ✅ 完整实现，亚像素误差 < 0.05 px |
+| 三角测量 | ✅ 完整实现（向量化） |
+| 多视角配准 / 网格重建 | ✅ 完整实现（Open3D） |
+| 网格封闭化 / 体积计算 | ✅ 完整实现 + 测试 |
+| 主控流程 / CLI | ✅ 完整实现 |
+| 图形界面 | ⬜ 待开发 |
+| 单片机固件 | ✅ Arduino 版（后续转 STM32 HAL） |
 
 ---
 
