@@ -1,0 +1,16 @@
+# TriniScan 上位机依赖
+numpy>=1.24
+opencv-python>=4.8
+scipy>=1.10
+open3d>=0.17
+trimesh>=3.23
+pyserial>=3.5
+PyYAML>=6.0
+
+# 可选：图形界面
+# PyQt5>=5.15
+
+# 可选：开发工具
+# pytest>=7.0
+# black
+# isort

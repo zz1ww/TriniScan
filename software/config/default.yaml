@@ -1,0 +1,73 @@
+# TriniScan 默认配置
+# 单位约定：长度 m，角度 度，时间 s（除特别说明）
+
+camera:
+  index: 0
+  backend: "dshow"        # Windows: dshow | 其他: any
+  width: 1920
+  height: 1080
+  auto_exposure: false
+  exposure: -6            # 依相机而定，需实测
+  gain: 0
+  auto_wb: false
+  discard_frames: 3       # 打开/抓图前丢弃帧数（等曝光稳定）
+
+turntable:
+  port: "COM3"
+  baudrate: 115200
+  steps_per_rev: 200      # 电机整步/圈
+  microstep: 32           # 细分
+  gear_ratio: 5.0         # 减速比
+  clockwise: true
+  settle_ms: 200          # 到位稳定延时
+  timeout_s: 5.0          # 单条指令超时
+
+scan:
+  angle_step_deg: 2.0     # 每视角转过的角度
+  num_views: 180          # 视角数 = 360 / angle_step_deg
+  timeout_s: 60           # 单件测量总时限
+
+calibration:
+  camera_file: "software/config/calib_camera.npz"
+  laser_file: "software/config/calib_laser.npz"
+  axis_file: "software/config/calib_axis.npz"
+
+camera_calib:
+  pattern_cols: 9         # 棋盘格内角点数（列）
+  pattern_rows: 6         # 棋盘格内角点数（行）
+  square_size_m: 0.020    # 方格实际尺寸 (m)
+  images_glob: "assets/calibration_targets/chessboard/*.png"
+
+laser:
+  wavelength_nm: 650
+  power_mw: 1.0
+  safety_class: 2
+
+extraction:
+  method: "gray_centroid" # gray_centroid | steger
+  threshold: 60           # 激光亮度阈值
+  roi: null               # [x, y, w, h] 或 null 表示全图
+  smooth_sigma: 1.0
+
+reconstruction:
+  voxel_size: 0.0005      # 下采样体素 (m)
+  outlier_k: 20
+  outlier_std: 2.0
+  poisson_depth: 9
+  density_quantile: 0.02  # 裁剪低密度面片的分位
+
+volume:
+  method: "divergence"    # divergence | voxel
+  voxel_pitch: 0.001      # 体素法校核的体素尺寸 (m)
+  unit: "cm3"
+
+output:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  pointcloud_dir: "data/pointclouds"
+  mesh_dir: "data/meshes"
+  result_dir: "data/results"
+  log_dir: "logs"
+
+logging:
+  level: "INFO"

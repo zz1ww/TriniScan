@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---- 数据与结果（体积大，不纳入版本控制）----
+data/raw/*
+data/pointclouds/*
+data/meshes/*
+data/results/*
+!data/**/.gitkeep
+
+logs/*
+!logs/.gitkeep
+
+# ---- 临时 / 缓存 ----
+*.tmp
+*.log
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- 机械工程文件临时 ----
+*.fcstd1
+*.FCStd1
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.code-workspace
