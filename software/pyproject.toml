@@ -21,11 +21,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["PyQt5>=5.15"]
+# GUI 基于标准库 Tkinter（随 Python 附带），只需 matplotlib 做绘图
+ui = ["matplotlib>=3.6"]
 dev = ["pytest>=7.0", "black", "isort", "ruff"]
 
 [project.scripts]
 triniscan = "triniscan.core.main:main"
+triniscan-gui = "triniscan.ui.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

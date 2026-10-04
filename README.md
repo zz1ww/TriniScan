@@ -93,7 +93,7 @@ TriniScan/
 │   │   ├── volume/              网格封闭 + 体积计算
 │   │   ├── core/                主控流程 + 配置 + CLI
 │   │   ├── tools/               一键标定 / 提取预览工具
-│   │   └── ui/                  图形界面
+│   │   └── ui/                  Tkinter 图形界面
 │   ├── config/                  参数配置文件
 │   └── tests/                   单元测试（47 用例）
 │
@@ -184,7 +184,19 @@ python -m triniscan --check        # 检查配置与标定
 python -m triniscan                # 执行测量
 ```
 
-### 4. 测试
+### 4. 图形界面
+
+基于标准库 **Tkinter**（无需额外依赖，随 Python 附带）：
+
+```bash
+python -m triniscan.ui          # 或 scripts\gui.bat
+```
+
+界面提供：参数编辑 / 标定检查 / 单帧预览（图像 + 中心线）/
+一键测量 / 点云预览 / 实时日志 / 结果显示。耗时操作在后台线程执行，
+界面不卡死。
+
+### 5. 测试
 
 ```bash
 cd software
@@ -220,7 +232,7 @@ PYTHONPATH=. python -m pytest tests/ -v
 | 多视角配准 / 网格重建 | ✅ 完整实现（Open3D） |
 | 网格封闭化 / 体积计算 | ✅ 完整实现 + 测试 |
 | 主控流程 / CLI | ✅ 完整实现 |
-| 图形界面 | ⬜ 待开发 |
+| 图形界面（Tkinter） | ✅ 完整实现（参数编辑/预览/测量/日志） |
 | 单片机固件 | ✅ Arduino 版（后续转 STM32 HAL） |
 
 ---
