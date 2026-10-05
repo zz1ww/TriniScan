@@ -2,7 +2,7 @@
 
 协议
 ----
-与 ``firmware/mcu/turntable_controller.ino`` 对应，ASCII 行协议，
+与固件 ``firmware/mcu_stm32_cubeide`` / ``firmware/mcu_stm32_spl`` 对应，ASCII 行协议，
 ``\\n`` 结尾，波特率 115200::
 
     PING            → PONG

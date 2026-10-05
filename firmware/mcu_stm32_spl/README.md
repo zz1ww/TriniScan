@@ -1,7 +1,7 @@
 # TriniScan 转台控制器固件（STM32F103C8T6 + 标准外设库 / Keil5）
 
 基于 **STM32F10x 标准外设库（SPL）** 的转台控制固件，
-**Keil MDK5 工程**，功能与 HAL 版、Arduino 版**完全等价**，
+**Keil MDK5 工程**，功能与 HAL 版（`firmware/mcu_stm32_cubeide/`）**完全等价**，
 串口协议一致，上位机无需任何改动。
 
 ## ⚠️ 先读这个
@@ -98,15 +98,15 @@ mcu_stm32_spl/
 - **运动由硬件定时器驱动**，精度不受主循环影响
 - 运动**非阻塞**：转台转动时上位机仍可查询状态、急停
 
-## 三版固件对照
+## 两版固件对照
 
-| | Arduino 版 | HAL 版 | **标准库版（本目录）** |
-|---|---|---|---|
-| 位置 | `firmware/mcu/` | `firmware/mcu_stm32/` | `firmware/mcu_stm32_spl/` |
-| 工具 | Arduino IDE | STM32CubeIDE | **Keil MDK5** |
-| 库 | Arduino | STM32 HAL | **STM32 标准外设库** |
-| 脉冲 | 阻塞延时 | 定时器中断 | 定时器中断 |
-| 协议 | ✅ 一致 | ✅ 一致 | ✅ 一致 |
+| | HAL 版 | **标准库版（本目录）** |
+|---|---|---|
+| 位置 | `firmware/mcu_stm32_cubeide/` | `firmware/mcu_stm32_spl/` |
+| 工具 | STM32CubeIDE | **Keil MDK5** |
+| 库 | STM32 HAL | **STM32 标准外设库** |
+| 脉冲 | TIM1 PWM + 中断 | 定时器中断 |
+| 协议 | ✅ 一致 | ✅ 一致 |
 
 ## 待办（二期）
 

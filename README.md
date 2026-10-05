@@ -173,7 +173,14 @@ pip install -r software/requirements.txt
 
 ### 2. 固件烧录
 
-见 `firmware/mcu/README.md`（Arduino/STM32 转台控制器）。
+转台控制器提供两套等价固件（串口协议一致，任选其一）：
+
+| 固件 | 位置 | 工具链 |
+|---|---|---|
+| CubeIDE（HAL，实测通过） | `firmware/mcu_stm32_cubeide/` | STM32CubeIDE |
+| 标准库（Keil5） | `firmware/mcu_stm32_spl/` | Keil MDK5 |
+
+详见各自目录下的 `README.md`。
 
 ### 3. 运行
 
@@ -233,7 +240,7 @@ PYTHONPATH=. python -m pytest tests/ -v
 | 网格封闭化 / 体积计算 | ✅ 完整实现 + 测试 |
 | 主控流程 / CLI | ✅ 完整实现 |
 | 图形界面（Tkinter） | ✅ 完整实现（参数编辑/预览/测量/日志） |
-| 单片机固件 | ✅ Arduino 版（后续转 STM32 HAL） |
+| 单片机固件 | ✅ STM32F103C8T6（HAL / 标准库两版，协议一致） |
 
 ---
 

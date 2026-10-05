@@ -25,11 +25,17 @@ TriniScan/                                  ← 项目根
 │   ├── electronics/             电路（原理图/接线，待补充）
 │   └── datasheets/              器件数据手册（待补充）
 │
-├── firmware/                    嵌入式固件
-│   └── mcu/
-│       ├── README.md            固件说明 + 串口协议
-│       ├── config.h             引脚/运动学参数
-│       └── turntable_controller.ino   转台控制器（Arduino）
+├── firmware/                    嵌入式固件（两套等价实现，协议一致）
+│   ├── mcu_stm32_cubeide/       STM32F103C8T6 + HAL（实测通过，推荐）
+│   │   ├── TriniScan.ioc        CubeMX 配置
+│   │   ├── Core/Inc/config.h    引脚/速度/极性参数
+│   │   ├── Core/Src/motor.c     TIM1 PWM + 中断计数
+│   │   ├── Core/Src/cmd.c       串口命令解析
+│   │   └── README.md            引脚/设计/导入说明
+│   └── mcu_stm32_spl/           STM32F103C8T6 + 标准库（Keil5）
+│       ├── User/                应用代码（config/motor/cmd/main）
+│       ├── Doc/Keil搭建说明.md
+│       └── README.md
 │
 ├── software/                    上位机软件
 │   ├── requirements.txt         依赖
@@ -93,8 +99,9 @@ TriniScan/                                  ← 项目根
 | 看标定方法 | `docs/04_标定方案.md` |
 | 看体积算法 | `docs/05_体积计算方案.md` |
 | 改参数 | `software/config/default.yaml` |
-| 改引脚/运动学 | `firmware/mcu/config.h` |
-| 改转台协议 | `firmware/mcu/turntable_controller.ino` + `software/triniscan/turntable/controller.py` |
+| 改引脚/运动学 | `firmware/mcu_stm32_cubeide/Core/Inc/config.h` |
+| 改转台固件 | `firmware/mcu_stm32_cubeide/Core/Src/motor.c` |
+| 改转台协议 | `firmware/mcu_stm32_cubeide/Core/Src/cmd.c` + `software/triniscan/turntable/controller.py` |
 | 跑主流程 | `software/triniscan/core/pipeline.py` |
 | 复现机械件 | `hardware/mechanical/ciclop/` |
 
