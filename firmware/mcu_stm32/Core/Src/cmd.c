@@ -99,7 +99,7 @@ static void exec_command(char *cmd)
         }
 
     } else if (strncmp(cmd, "ROT", 3) == 0) {
-        float deg = strtof(cmd + 3, NULL);
+        float deg = (float)atof(cmd + 3);  /* atof 兼容性优于 strtof */
         motor_move_degrees(deg);
         cmd_send_line("OK");
 
