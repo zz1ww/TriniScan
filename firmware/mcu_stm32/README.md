@@ -1,4 +1,8 @@
-# TriniScan 转台控制器固件（STM32F103C8T6 + HAL）
+# TriniScan 转台控制器固件（STM32F103C8T6 + HAL）— 参考版
+
+> ⚠️ **本目录是"从零集成参考模板"（TIM2 基础定时器 + 两拍脉冲方案）。**
+> **实际使用请看 [`../mcu_stm32_cubeide/`](../mcu_stm32_cubeide/)** ——
+> 那是**已编译烧录验证**的完整工程（TIM1 PWM + 中断计数方案）。
 
 基于 **STM32CubeIDE + HAL** 的转台控制固件，功能与 `firmware/mcu/`（Arduino 版）
 **完全等价**，串口协议一致，可直接替换。

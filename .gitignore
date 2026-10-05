@@ -41,3 +41,25 @@ Thumbs.db
 .vscode/
 .idea/
 *.code-workspace
+
+# ---- STM32 / CubeIDE 构建产物 ----
+Debug/
+Release/
+*.launch
+Drivers/
+**/Drivers/STM32F1xx_HAL_Driver/
+*.o
+*.d
+*.elf
+*.map
+*.list
+*.bin
+
+# ---- Keil ----
+Objects/
+Listings/
+*.uvguix.*
+*.scvd
+
+# ---- 单片机固件本地备份 ----
+*.bak
