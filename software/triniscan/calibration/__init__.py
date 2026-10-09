@@ -26,6 +26,14 @@ from .axis_calib import (
     save_axis_calib,
     transform_about_axis,
 )
+from .axis_live import (
+    AxisLiveCollector,
+    RegionOfInterest,
+    SpotNotFound,
+    detect_sphere_center,
+    detect_spot_peak,
+    sphere_center_from_pixel,
+)
 
 __all__ = [
     "CameraCalibResult", "calibrate_camera",
@@ -37,4 +45,7 @@ __all__ = [
     "AxisCalibResult", "calibrate_axis",
     "load_axis_calib", "save_axis_calib",
     "transform_about_axis",
+    "AxisLiveCollector", "RegionOfInterest", "SpotNotFound",
+    "detect_spot_peak", "detect_sphere_center",
+    "sphere_center_from_pixel",
 ]

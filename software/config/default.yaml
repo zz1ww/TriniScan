@@ -42,6 +42,21 @@ camera_calib:
   images_glob: "assets/calibration_targets/chessboard/*.png"
 
 # ---------------------------------------------------------------------------
+# 转轴现场标定（"放球即可测"）
+axis_calib:
+  sphere_radius_m: 0.020    # 标记球半径 (m)；乒乓球直径 40mm -> 半径 0.020
+  method: "peak"            # peak(最亮极点) | sphere(球心)
+  num_views: 12             # 采样角度数（全周均分）
+  step_deg: 30.0            # 每步转角 = 360/num_views（可覆盖）
+  min_views: 3              # 最少有效视角
+  settle_ms: 250            # 转台到位后等待稳定 (ms)
+  spot_threshold: 60.0      # peak 法：亮点灰度下限（相对背景）
+  spot_win_px: 25           # peak 法：亮点搜索窗口半径 (px)
+  min_radius_px: 8.0        # sphere 法：球轮廓最小半径 (px)
+  max_radius_px: 240.0      # sphere 法：球轮廓最大半径 (px)
+  archive_dir: "data/calibration/axis"   # 现场标定点的存档目录
+
+# ---------------------------------------------------------------------------
 laser:
   wavelength_nm: 650
   power_mw: 1.0

@@ -60,6 +60,12 @@ class CalibrationPanel(ttk.Frame):
         self._busy = False               # 标定进行中
 
         self._mode = tk.StringVar(value=CalibMode.CAMERA.value)
+        # 转轴现场标定的参数（可在界面配置）
+        self._sphere_radius_mm = tk.StringVar(value="20.0")
+        self._axis_method = tk.StringVar(value="peak")
+        self._axis_views = tk.StringVar(value="12")
+        self._axis_sweep_active = False
+        self._axis_stop = False
         self._build_ui()
         self._poll()
 
@@ -75,6 +81,39 @@ class CalibrationPanel(ttk.Frame):
                 top, text=m.label, value=m.value,
                 variable=self._mode, command=self._on_mode_change,
             ).pack(side="left", padx=8, pady=4)
+
+        # 转轴参数（仅转轴模式显示）
+        self.axis_opts = ttk.LabelFrame(self, text="转轴标定设置")
+
+        r = ttk.Frame(self.axis_opts)
+        r.pack(fill="x", padx=8, pady=(4, 2))
+        ttk.Label(r, text="标记球半径 (mm):").pack(side="left")
+        self.ent_radius = ttk.Entry(r, textvariable=self._sphere_radius_mm,
+                                    width=8)
+        self.ent_radius.pack(side="left", padx=4)
+        ttk.Label(r, text="  采样角度数:").pack(side="left")
+        self.ent_views = ttk.Entry(r, textvariable=self._axis_views,
+                                   width=6)
+        self.ent_views.pack(side="left", padx=4)
+
+        m = ttk.Frame(self.axis_opts)
+        m.pack(fill="x", padx=8, pady=(2, 6))
+        ttk.Label(m, text="取点方法:").pack(side="left")
+        ttk.Radiobutton(m, text="最亮极点法（关环境光）", value="peak",
+                        variable=self._axis_method).pack(side="left",
+                                                         padx=4)
+        ttk.Radiobutton(m, text="球心法（亮背景）", value="sphere",
+                        variable=self._axis_method).pack(side="left",
+                                                         padx=4)
+
+        self.lbl_axis_hint = ttk.Label(
+            self.axis_opts, foreground="#8a5a00", wraplength=760,
+            justify="left",
+            text=("操作：① 先完成「相机内参」与「激光平面」标定；"
+                  "② 把涂黑的小球固定在转台偏心位置，确保全程在视野内；"
+                  "③ 点击「开始转轴标定」，程序将自动转动转台、逐角度"
+                  "拍摄并拟合转轴。"))
+        self.lbl_axis_hint.pack(fill="x", padx=8, pady=(0, 6))
 
         mid = ttk.Frame(self)
         mid.pack(fill="both", expand=True, padx=6, pady=6)
@@ -140,13 +179,24 @@ class CalibrationPanel(ttk.Frame):
     def _on_mode_change(self) -> None:
         self._stop_live()
         self._session = None
+        mode = self._current_mode()
         self._ensure_session()
         self._refresh_ui()
-        self._append_verdict(f"已切换到：{self._current_mode().label}")
-        if self._current_mode() is CalibMode.AXIS:
+        self._append_verdict(f"已切换到：{mode.label}")
+
+        # 转轴模式的专属设置面板与按钮
+        if mode is CalibMode.AXIS:
+            self.axis_opts.pack(fill="x", padx=6, pady=(4, 0),
+                                before=self.preview.master)
+            self.btn_calib.configure(text="开始转轴标定")
+            self.btn_shoot.configure(state="disabled")
+            self.btn_live.configure(state="disabled")
             self._append_verdict(
-                "转轴标定需要特征点三维坐标，本界面提供接口；"
-                "请先用「转轴」采集各角度图像后由外部流程计算。")
+                "转轴模式：请放好标记球，点击「开始转轴标定」全自动完成。")
+        else:
+            self.axis_opts.pack_forget()
+            self.btn_calib.configure(text="开始标定")
+            self.btn_live.configure(state="normal")
 
     # ------------------------------------------------------------------
     # 实时取景
@@ -239,17 +289,16 @@ class CalibrationPanel(ttk.Frame):
         self._refresh_ui()
 
     def _on_calibrate(self) -> None:
+        if self._current_mode() is CalibMode.AXIS:
+            self._start_axis_sweep()
+            return
+
         session = self._ensure_session()
         if not session.ready:
             messagebox.showinfo(
                 "提示",
                 f"至少需要 {session.mode.min_views} 张有效图像，"
                 f"当前 {session.count} 张。")
-            return
-        if self._current_mode() is CalibMode.AXIS:
-            messagebox.showinfo(
-                "提示",
-                "转轴标定不接受图像，请通过接口传入特征点三维坐标。")
             return
         self._set_busy(True)
         self._append_verdict("开始标定…")
@@ -262,6 +311,75 @@ class CalibrationPanel(ttk.Frame):
                          name="triniscan-calib").start()
 
     # ------------------------------------------------------------------
+    # 转轴：全自动扫描
+    # ------------------------------------------------------------------
+    def _read_axis_params(self) -> bool:
+        """读取并校验界面上的转轴参数，写回配置。"""
+        try:
+            radius_mm = float(self._sphere_radius_mm.get())
+            views = int(self._axis_views.get())
+        except ValueError:
+            messagebox.showerror("参数错误", "球半径与角度数必须是数字。")
+            return False
+        if radius_mm <= 0 or views < 3:
+            messagebox.showerror("参数错误", "球半径需 > 0，角度数需 >= 3。")
+            return False
+        try:
+            self.cfg.set("axis_calib.sphere_radius_m", radius_mm / 1000.0)
+            self.cfg.set("axis_calib.num_views", views)
+            self.cfg.set("axis_calib.method", self._axis_method.get())
+        except Exception:  # noqa: BLE001 - 配置对象可能只读
+            log.debug("配置对象不支持 set，使用默认参数")
+        return True
+
+    def _missing_prereqs(self) -> list:
+        """返回缺失的前置标定文件说明（空列表表示齐全）。"""
+        import os
+        missing = []
+        for key, label in (("calibration.camera_file", "相机内参"),
+                           ("calibration.laser_file", "激光平面")):
+            path = self.cfg.get(key, None)
+            if path and not os.path.isabs(path):
+                path = os.path.join(getattr(self.cfg, "root", "."), path)
+            if not path or not os.path.exists(path):
+                missing.append(label + "（" + str(path) + "）")
+        return missing
+
+    def _start_axis_sweep(self) -> None:
+        if self._axis_sweep_active:
+            return
+        if not self._read_axis_params():
+            return
+        missing = self._missing_prereqs()
+        if missing:
+            messagebox.showwarning(
+                "前置标定未完成",
+                "转轴标定需要先完成：\n  - " + "\n  - ".join(missing)
+                + "\n\n请先切换到对应模式完成标定。")
+            return
+
+        self._axis_sweep_active = True
+        self._axis_stop = False
+        self._set_busy(True)
+        self._stop_live()
+        self._append_verdict("开始转轴自动标定（转台将自动转动）…")
+
+        def _progress(i: int, total: int, msg: str) -> None:
+            self._queue.put(("axis_progress", (i, total, msg)))
+
+        def _run() -> None:
+            from .capture_session import sweep_axis_calibration
+            result = sweep_axis_calibration(
+                self.cfg,
+                on_progress=_progress,
+                stop_flag=lambda: self._axis_stop,
+            )
+            self._queue.put(("axis_done", result))
+
+        threading.Thread(target=_run, daemon=True,
+                         name="triniscan-axis").start()
+
+    # ------------------------------------------------------------------
     # 状态刷新
     # ------------------------------------------------------------------
     def _refresh_ui(self) -> None:
@@ -270,6 +388,13 @@ class CalibrationPanel(ttk.Frame):
         rec = max(session.mode.recommend_views, 1)
         frac = min(session.count / rec, 1.0)
         self.bar_progress.configure(value=frac * 100)
+        if self._current_mode() is CalibMode.AXIS:
+            self.btn_undo.configure(state="disabled")
+            self.btn_clear.configure(state="disabled")
+            self.btn_calib.configure(
+                state="disabled" if self._busy else "normal")
+            return
+
         state = "normal" if session.count else "disabled"
         self.btn_undo.configure(state=state)
         self.btn_clear.configure(state=state)
@@ -280,12 +405,14 @@ class CalibrationPanel(ttk.Frame):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.lbl_status.configure(text="标定中…" if busy else "就绪")
-        self.btn_calib.configure(
-            state="disabled" if busy else "normal")
+        self.btn_calib.configure(state="disabled" if busy else "normal")
         if busy:
             self.btn_shoot.configure(state="disabled")
-        elif self._capturing:
-            self.btn_shoot.configure(state="normal")
+            self.btn_live.configure(state="disabled")
+        elif self._current_mode() is not CalibMode.AXIS:
+            self.btn_live.configure(state="normal")
+            if self._capturing:
+                self.btn_shoot.configure(state="normal")
 
     def _append_verdict(self, text: str) -> None:
         self.txt_verdict.configure(state="normal")
@@ -320,6 +447,25 @@ class CalibrationPanel(ttk.Frame):
                         messagebox.showinfo("标定完成", payload.message)
                     else:
                         messagebox.showerror("标定失败", payload.message)
+                elif kind == "axis_progress":
+                    i, total, msg = payload
+                    self._append_verdict(f"[{i}/{total}] {msg}")
+                    self.bar_progress.configure(
+                        value=100.0 * i / max(total, 1))
+                elif kind == "axis_done":
+                    self._axis_sweep_active = False
+                    self._set_busy(False)
+                    self._append_verdict(payload.message)
+                    if payload.ok:
+                        detail = (
+                            payload.message + "\n\n"
+                            "转轴方向: " + str(np.round(payload.direction, 5))
+                            + "\n轴上一点: " + str(np.round(payload.point, 5))
+                            + "\n现场点存档: " + str(payload.points_path))
+                        messagebox.showinfo("转轴标定完成", detail)
+                    else:
+                        messagebox.showerror("转轴标定失败",
+                                             payload.message)
                 elif kind == "error":
                     self._append_verdict(payload)
         except queue.Empty:

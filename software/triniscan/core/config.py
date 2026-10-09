@@ -70,6 +70,21 @@ class Config(Mapping):
                 return default
         return node
 
+    def set(self, key_path: str, value: Any) -> None:
+        """按点号路径写入取值，如 ``set("axis_calib.method", "peak")``。
+
+        中间层级不存在时自动创建字典，便于界面把用户输入写回配置。
+        """
+        parts = key_path.split(".")
+        node: Any = self._data
+        for part in parts[:-1]:
+            nxt = node.get(part) if isinstance(node, dict) else None
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[part] = nxt
+            node = nxt
+        node[parts[-1]] = value
+
     def resolve(self, key_path: str, default: str | None = None) -> str:
         """取路径型配置并解析为绝对路径（相对项目根）。"""
         value = self.get(key_path, default)

@@ -29,6 +29,7 @@ __all__ = [
     "QualityVerdict",
     "CaptureSession",
     "CalibOutcome",
+    "AxisSweepResult",
 ]
 
 
@@ -423,3 +424,195 @@ class CaptureSession:
             quality=f"RMS={result.residual_rms * 1e3:.3f} mm",
             out_path=out_path, elapsed_s=time.time() - t0,
         )
+
+
+# ---------------------------------------------------------------------------
+@dataclass
+class AxisSweepResult:
+    """转轴自动扫描的结果。"""
+
+    ok: bool
+    message: str
+    num_views: int = 0
+    num_failed: int = 0
+    radius_m: float = 0.0
+    direction: Optional[np.ndarray] = None
+    point: Optional[np.ndarray] = None
+    residual_rms: float = 0.0
+    points_path: Optional[str] = None
+    out_path: Optional[str] = None
+    elapsed_s: float = 0.0
+
+    @property
+    def quality(self) -> str:
+        return f"RMS={self.residual_rms * 1e3:.3f} mm"
+
+
+def sweep_axis_calibration(
+    cfg,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    make_camera=None,
+    make_turntable=None,
+    save_images: bool = False,
+    stop_flag: Optional[Callable[[], bool]] = None,
+) -> AxisSweepResult:
+    """**全自动**转轴标定：转台转 N 个角度，逐个拍照并提取标记球。
+
+    Parameters
+    ----------
+    cfg : 配置对象
+    on_progress : ``(index, total, message)`` 回调，用于界面进度提示
+    make_camera : 工厂 ``() -> Camera``；默认用 :class:`~triniscan.camera.Camera`
+    make_turntable : 工厂 ``() -> Turntable``；默认用转台控制器
+    save_images : 是否把每个角度的图像落盘（默认否）
+    stop_flag : ``() -> bool``，返回 True 时提前中止
+
+    Returns
+    -------
+    AxisSweepResult
+    """
+    import cv2
+
+    from ..calibration import AxisLiveCollector, load_camera_calib
+    from ..calibration import load_laser_calib
+
+    t0 = time.time()
+
+    def _log_progress(i: int, total: int, msg: str) -> None:
+        log.info("[%d/%d] %s", i, total, msg)
+        if on_progress is not None:
+            on_progress(i, total, msg)
+
+    # --- 前置：两个标定文件必须存在 ---
+    def _resolve(key: str) -> str:
+        try:
+            path = cfg.get(key, None)
+        except AttributeError:
+            path = None
+        if not path:
+            return ""
+        if not os.path.isabs(path):
+            path = os.path.join(getattr(cfg, "root", "."), path)
+        return path
+
+    cam_file = _resolve("calibration.camera_file")
+    laser_file = _resolve("calibration.laser_file")
+    if not cam_file or not os.path.exists(cam_file):
+        return AxisSweepResult(
+            ok=False, message=f"请先完成相机标定：{cam_file}")
+    if not laser_file or not os.path.exists(laser_file):
+        return AxisSweepResult(
+            ok=False, message=f"请先完成激光平面标定：{laser_file}")
+
+    cam = load_camera_calib(cam_file)
+    laser = load_laser_calib(laser_file)
+
+    # --- 参数 ---
+    def _get(key: str, default):
+        try:
+            return cfg.get(key, default)
+        except AttributeError:
+            return default
+
+    radius = float(_get("axis_calib.sphere_radius_m", 0.020))
+    method = str(_get("axis_calib.method", "peak"))
+    num_views = int(_get("axis_calib.num_views", 12))
+    step = 360.0 / max(num_views, 1)
+
+    collector = AxisLiveCollector(
+        cam.K, laser.plane, sphere_radius_m=radius,
+        method=method, dist=cam.dist)
+    collector._algo_cfg = {
+        "spot_threshold": float(_get("axis_calib.spot_threshold", 60.0)),
+        "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
+        "min_radius_px": float(_get("axis_calib.min_radius_px", 8.0)),
+        "max_radius_px": float(_get("axis_calib.max_radius_px", 240.0)),
+    }
+
+    # --- 打开设备 ---
+    if make_camera is None:
+        from ..camera import Camera as _Camera
+        make_camera = lambda: _Camera(cfg.raw["camera"])
+    if make_turntable is None:
+        from ..turntable.controller import Turntable as _Turntable
+        make_turntable = lambda: _Turntable(cfg.raw["turntable"])
+
+    archive_dir = _get("axis_calib.archive_dir",
+                       "data/calibration/axis")
+    if not os.path.isabs(archive_dir):
+        archive_dir = os.path.join(getattr(cfg, "root", "."), archive_dir)
+    out_path = _resolve("calibration.axis_file")
+
+    try:
+        with make_camera() as camera, make_turntable() as table:
+            for i in range(num_views):
+                if stop_flag is not None and stop_flag():
+                    _log_progress(i, num_views, "已中止")
+                    break
+                angle = i * step
+                if i > 0:
+                    table.rotate_deg(step)
+                img = camera.grab()
+                if img is None:
+                    collector.errors.append(f"{angle:.0f}°: 取像失败")
+                    continue
+                if save_images:
+                    try:
+                        os.makedirs(archive_dir, exist_ok=True)
+                        cv2.imwrite(
+                            os.path.join(archive_dir, f"{i:03d}.png"), img)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("图像保存失败: %s", exc)
+                point = collector.add_angle(img, angle_deg=angle)
+                if point is None:
+                    _log_progress(i + 1, num_views,
+                                  f"{angle:.0f}° 未找到标记球（已跳过）")
+                else:
+                    _log_progress(i + 1, num_views,
+                                  f"{angle:.0f}° 已收录")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("转轴扫描失败")
+        return AxisSweepResult(
+            ok=False, message=f"设备或采集失败：{exc}",
+            num_views=collector.count,
+            elapsed_s=time.time() - t0)
+
+    if collector.count < 3:
+        return AxisSweepResult(
+            ok=False,
+            message=(f"有效视角不足（{collector.count} < 3）。"
+                     f"请检查标记球、环境光与取点方法。"),
+            num_views=collector.count, num_failed=len(collector.errors),
+            elapsed_s=time.time() - t0)
+
+    # --- 标定（复用原有 calibrate_axis）---
+    points_path = os.path.join(archive_dir, "axis_points.npy")
+    try:
+        result = collector.calibrate(out_path=out_path or None,
+                                     save_points_to=points_path)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("转轴标定失败")
+        return AxisSweepResult(
+            ok=False, message=f"拟合失败：{exc}",
+            num_views=collector.count, num_failed=len(collector.errors),
+            elapsed_s=time.time() - t0)
+
+    rms = float(result.residual_rms)
+    msg = (f"转轴标定完成：{collector.count} 个视角，"
+           f"半径 {result.radius * 1e3:.1f} mm，"
+           f"残差 RMS {rms * 1e3:.3f} mm")
+    if rms > 1e-3:
+        msg += "（警告：残差偏大，建议重拍）"
+    if collector.errors:
+        msg += f"；{len(collector.errors)} 个角度被跳过"
+
+    return AxisSweepResult(
+        ok=True, message=msg,
+        num_views=collector.count, num_failed=len(collector.errors),
+        radius_m=float(result.radius),
+        direction=result.direction, point=result.point,
+        residual_rms=rms,
+        points_path=points_path,
+        out_path=out_path or None,
+        elapsed_s=time.time() - t0,
+    )
