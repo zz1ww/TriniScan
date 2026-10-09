@@ -10,6 +10,48 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable, Optional
 
+from .labels import field_hint, field_label, group_label
+
+
+# ---------------------------------------------------------------------------
+def _bind_tooltip(widget: tk.Misc, text: str,
+                  delay_ms: int = 500) -> None:
+    """给控件绑定一个简单的悬停提示（无第三方依赖）。"""
+    if not text:
+        return
+    state: dict[str, Any] = {"tip": None, "after": None}
+
+    def _show() -> None:
+        if state["tip"] is not None:
+            return
+        try:
+            x = widget.winfo_rootx() + 12
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+        except tk.TclError:  # pragma: no cover - 控件已销毁
+            return
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(tip, text=text, justify="left", background="#ffffe0",
+                 relief="solid", borderwidth=1,
+                 font=("", 9)).pack()
+        state["tip"] = tip
+
+    def _enter(_e: tk.Event) -> None:
+        state["after"] = widget.after(delay_ms, _show)
+
+    def _leave(_e: tk.Event) -> None:
+        if state["after"] is not None:
+            widget.after_cancel(state["after"])
+            state["after"] = None
+        if state["tip"] is not None:
+            state["tip"].destroy()
+            state["tip"] = None
+
+    widget.bind("<Enter>", _enter, add="+")
+    widget.bind("<Leave>", _leave, add="+")
+    widget.bind("<Destroy>", _leave, add="+")
+
 
 # ---------------------------------------------------------------------------
 class ScrollFrame(ttk.Frame):
@@ -66,7 +108,8 @@ class ConfigPanel(ttk.LabelFrame):
         for group, params in cfg.raw.items():
             if group.startswith("_") or not isinstance(params, dict):
                 continue
-            ttk.Label(body, text=group, style="Group.TLabel").grid(
+            ttk.Label(body, text=group_label(group),
+                      style="Group.TLabel").grid(
                 row=row, column=0, columnspan=2, sticky="w",
                 padx=6, pady=(8, 2))
             row += 1
@@ -78,16 +121,20 @@ class ConfigPanel(ttk.LabelFrame):
     # ------------------------------------------------------------------
     def _add_field(self, parent: tk.Misc, row: int, key_path: str,
                    value: Any) -> None:
-        short = key_path.split(".", 1)[1]
-        ttk.Label(parent, text=short).grid(
-            row=row, column=0, sticky="w", padx=(16, 6), pady=1)
+        short = field_label(key_path)
+        label = ttk.Label(parent, text=short)
+        label.grid(row=row, column=0, sticky="w", padx=(16, 6), pady=1)
+
+        # 悬停提示：中文说明 + 原始配置键（便于对照 yaml 与命令行）
+        hint = field_hint(key_path)
+        tip = hint + ("\n" if hint else "") + f"配置项：{key_path}"
+        _bind_tooltip(label, tip)
 
         if isinstance(value, bool):
-            var = tk.BooleanVar(value=value)
+            var = tk.StringVar(value="是" if value else "否")
             widget = ttk.Combobox(parent, textvariable=var,
-                                  values=("true", "false"), width=14,
+                                  values=("是", "否"), width=14,
                                   state="readonly")
-            var.set("true" if value else "false")
             self._types[key_path] = bool
         elif value is None:
             var = tk.StringVar(value="")
@@ -117,7 +164,7 @@ class ConfigPanel(ttk.LabelFrame):
             if typ is type(None):
                 return None if text == "" else text
             if typ is bool:
-                return text.lower() in ("1", "true", "yes", "on")
+                return text in ("是", "true", "True", "1", "yes", "on")
             if typ is int:
                 return int(float(text))
             if typ is float:
@@ -132,7 +179,7 @@ class ConfigPanel(ttk.LabelFrame):
         for key_path, var in self._vars.items():
             value = cfg.get(key_path)
             if isinstance(value, bool):
-                var.set("true" if value else "false")
+                var.set("是" if value else "否")
             elif value is None:
                 var.set("")
             else:
