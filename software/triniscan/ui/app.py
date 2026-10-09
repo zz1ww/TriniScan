@@ -291,9 +291,12 @@ class MainWindow(ttk.Frame):
         cfg = self.cfg
 
         def job(report):
+            import time
+
             from ..core.pipeline import ScanPipeline
 
             pipe = ScanPipeline(cfg)
+            t0 = time.time()
             report("载入标定…", 0.05)
             pipe.load_calibrations()
             report("采集（转-停-拍）…", 0.2)
@@ -303,20 +306,27 @@ class MainWindow(ttk.Frame):
             if not clouds:
                 raise RuntimeError("没有有效视角，测量失败")
             report("多视角配准…", 0.7)
-            pcd, _ = pipe.build_pointcloud(clouds)
+            pcd, pc_path = pipe.build_pointcloud(clouds)
             report("重建 + 体积…", 0.9)
-            vol, _closed, _mesh = pipe.measure_volume(pcd)
+            vol, _closed, mesh_path = pipe.measure_volume(pcd)
             points = None
             try:
                 import numpy as np
                 points = np.asarray(pcd.points)
             except Exception:  # noqa: BLE001
                 points = None
-            return vol, points
+            info = {
+                "elapsed_s": time.time() - t0,
+                "num_views": len(clouds),
+                "num_points": int(sum(len(c.points) for c in clouds)),
+                "mesh_path": mesh_path,
+                "points_path": pc_path,
+            }
+            return vol, points, info
 
         def on_done(payload):
-            vol, points = payload
-            result = _make_result(vol)
+            vol, points, info = payload
+            result = _make_result(vol, info)
             self._last_result = result
             self.result_panel.update_result(result)
             if points is not None:
@@ -324,6 +334,10 @@ class MainWindow(ttk.Frame):
             self._append_log(
                 f"测量完成: {result.volume_cm3:.2f} cm³ "
                 f"({result.num_points} 点)")
+            if result.mesh_path:
+                self._append_log(f"网格: {result.mesh_path}")
+            if result.points_path:
+                self._append_log(f"点云: {result.points_path}")
 
         self._start_task_then(job, "执行测量", on_done)
 
@@ -408,21 +422,31 @@ def _nest(key_path: str, value) -> dict:
     return node
 
 
-def _make_result(vol):
-    """由 ``VolumeResult`` 组装一个可在界面上展示的轻量结果对象。"""
+def _make_result(vol, info=None):
+    """由 ``VolumeResult``（+ 运行信息）组装界面展示用的轻量结果对象。
+
+    Parameters
+    ----------
+    vol : VolumeResult
+        体积计算结果。
+    info : dict, optional
+        运行信息，键可为 ``elapsed_s`` / ``num_views`` / ``num_points`` /
+        ``mesh_path`` / ``points_path``。缺省时以 0/None 填充。
+    """
     from ..core.pipeline import ScanResult
+    info = info or {}
     return ScanResult(
         volume_cm3=vol.volume_cm3,
         volume_m3=vol.volume_m3,
-        elapsed_s=0.0,
-        num_views=0,
-        num_points=0,
+        elapsed_s=float(info.get("elapsed_s", 0.0)),
+        num_views=int(info.get("num_views", 0)),
+        num_points=int(info.get("num_points", 0)),
         mesh_watertight=bool(vol.watertight),
         cross_check_cm3=(vol.cross_check_m3 * 1e6
                          if vol.cross_check_m3 else None),
         stages_s={},
-        mesh_path=None,
-        points_path=None,
+        mesh_path=info.get("mesh_path"),
+        points_path=info.get("points_path"),
     )
 
 

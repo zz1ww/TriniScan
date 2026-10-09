@@ -65,11 +65,17 @@ class PreviewPanel(ttk.LabelFrame):
             ttk.Label(self, text="（未安装 matplotlib，预览不可用；\n"
                                  "  pip install matplotlib）").pack(pady=20)
             self._fig = None
+            self._cbar = None
             return
 
         self._fig = Figure(figsize=(4, 3), dpi=100)
-        self._ax = self._fig.add_subplot(111)
-        self._ax.set_axis_off()
+        # 两个坐标区：2D（图像）与 3D（点云），按需切换显示
+        self._ax_img = self._fig.add_subplot(111)
+        self._ax_img.set_axis_off()
+        self._ax_cloud = self._fig.add_subplot(111, projection="3d")
+        self._ax_cloud.set_visible(False)
+        self._cbar = None        # 点云色条句柄（刷新时先移除，避免叠加）
+
         self._canvas = FigureCanvasTkAgg(self._fig, master=self)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
         self._toolbar = NavigationToolbar2Tk(self._canvas, self,
@@ -118,35 +124,65 @@ class PreviewPanel(ttk.LabelFrame):
     def _draw_image(self) -> None:
         if self._fig is None:
             return
-        self._ax.clear()
-        self._ax.set_axis_off()
+        self._ax_cloud.set_visible(False)
+        self._ax_img.set_visible(True)
+        self._ax_img.clear()
+        self._ax_img.set_axis_off()
         if self._image is not None:
             img = self._image
             if img.ndim == 3:
                 img = img[:, :, ::-1]  # BGR -> RGB
-            self._ax.imshow(img, cmap=None if img.ndim == 3 else "gray")
-            self._ax.set_title("激光图像")
+            self._ax_img.imshow(img, cmap=None if img.ndim == 3 else "gray")
+            self._ax_img.set_title("激光图像")
         else:
-            self._ax.text(0.5, 0.5, "暂无图像", ha="center", va="center")
+            self._ax_img.text(0.5, 0.5, "暂无图像",
+                              ha="center", va="center")
         self._canvas.draw_idle()
 
     def _draw_cloud(self) -> None:
         if self._fig is None:
             return
-        self._ax.clear()
+        self._ax_img.set_visible(False)
+        self._ax_cloud.set_visible(True)
+        ax = self._ax_cloud
+        # 先移除旧色条（必须在 clear 之前，否则句柄失效）
+        if self._cbar is not None:
+            self._cbar.remove()
+            self._cbar = None
+        ax.clear()
         if self._points is not None and len(self._points):
-            pts = self._points
-            # 依高度 z 着色，直观看出形状
+            ax.set_axis_on()
+            pts = np.asarray(self._points, dtype=float)
+            # 依高度 z 着色，直观看出形状；3D 视图可用鼠标左键
+            # 拖拽旋转、右键缩放（工具栏亦提供快捷按钮）。
             z = pts[:, 2]
-            sc = self._ax.scatter(pts[:, 0], pts[:, 1], c=z, s=0.5,
-                                  cmap="viridis")
-            self._fig.colorbar(sc, ax=self._ax, shrink=0.7, label="z (m)")
-            self._ax.set_aspect("equal", adjustable="datalim")
-            self._ax.set_title(f"点云 {len(pts)} 点")
-            self._ax.set_xlabel("x (m)")
-            self._ax.set_ylabel("y (m)")
+            sc = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=z, s=1.0,
+                            cmap="viridis", depthshade=False)
+            self._cbar = self._fig.colorbar(sc, ax=ax, shrink=0.6,
+                                            pad=0.1, label="z (m)")
+            # 三轴等比例，避免形状被拉伸
+            _set_axes_equal(ax, pts)
+            ax.set_title(f"点云 {len(pts)} 点")
+            ax.set_xlabel("x (m)")
+            ax.set_ylabel("y (m)")
+            ax.set_zlabel("z (m)")
+            ax.view_init(elev=20, azim=-60)
         else:
-            self._ax.text(0.5, 0.5, "暂无点云", ha="center", va="center")
-            self._ax.set_axis_off()
+            ax.text2D(0.5, 0.5, "暂无点云", transform=ax.transAxes,
+                      ha="center", va="center")
+            ax.set_axis_off()
         self._fig.tight_layout()
         self._canvas.draw_idle()
+
+
+def _set_axes_equal(ax, pts: np.ndarray) -> None:
+    """让 3D 三轴按相同比例显示，保证形状不被拉伸。"""
+    mins = pts.min(axis=0)
+    maxs = pts.max(axis=0)
+    centers = (mins + maxs) / 2.0
+    radius = float((maxs - mins).max()) / 2.0
+    if not np.isfinite(radius) or radius <= 0:
+        radius = 0.05
+    ax.set_xlim(centers[0] - radius, centers[0] + radius)
+    ax.set_ylim(centers[1] - radius, centers[1] + radius)
+    ax.set_zlim(centers[2] - radius, centers[2] + radius)

@@ -190,6 +190,13 @@ class ScanPipeline:
         except Exception as exc:  # noqa: BLE001
             log.warning("网格保存失败: %s", exc)
             mesh_path = None
+        # 同时导出 OBJ（通用 CAD/审阅格式，便于第三者打开核对）
+        try:
+            obj_path = os.path.join(mesh_dir, "mesh.obj")
+            closed.mesh.export(obj_path)
+            log.info("网格已保存: %s / %s", mesh_path, obj_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("OBJ 保存失败: %s", exc)
         return vol, closed, mesh_path
 
     # ------------------------------------------------------------------
