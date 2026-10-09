@@ -50,6 +50,7 @@ class MainWindow(ttk.Frame):
         self._build_menu()
         self._build_layout()
         self._build_statusbar()
+        self._switch_page()
         self._poll()
 
     # ------------------------------------------------------------------
@@ -80,6 +81,8 @@ class MainWindow(ttk.Frame):
 
         m_tools = tk.Menu(menubar, tearoff=0)
         m_tools.add_command(label="检查标定", command=self._on_check)
+        m_tools.add_command(label="切换到标定界面",
+                            command=self._goto_calibration)
         m_tools.add_command(label="预览单帧图像…",
                             command=self._on_preview_file)
         m_tools.add_command(label="开始测量", command=self._on_run)
@@ -95,7 +98,35 @@ class MainWindow(ttk.Frame):
         self.master.config(menu=menubar)
 
     def _build_layout(self) -> None:
-        paned = ttk.Panedwindow(self, orient="horizontal")
+        """搭建可切换的两页界面：测量页与标定页。"""
+        # 顶部：界面切换条
+        switch = ttk.Frame(self)
+        switch.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Label(switch, text="界面:", style="Key.TLabel").pack(
+            side="left")
+        self._page = tk.StringVar(value="measure")
+        ttk.Radiobutton(switch, text="测量", value="measure",
+                        variable=self._page,
+                        command=self._switch_page).pack(side="left", padx=4)
+        ttk.Radiobutton(switch, text="标定", value="calibration",
+                        variable=self._page,
+                        command=self._switch_page).pack(side="left")
+
+        # 页面容器
+        self._container = ttk.Frame(self)
+        self._container.pack(fill="both", expand=True)
+
+        self._page_measure = ttk.Frame(self._container)
+        self._page_calib = ttk.Frame(self._container)
+        for page in (self._page_measure, self._page_calib):
+            page.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self._build_measure_page(self._page_measure)
+        self._build_calib_page(self._page_calib)
+
+    def _build_measure_page(self, parent: ttk.Frame) -> None:
+        """测量页：参数配置 + 预览 + 结果 + 日志（原布局）。"""
+        paned = ttk.Panedwindow(parent, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
         # 左：配置
@@ -114,7 +145,7 @@ class MainWindow(ttk.Frame):
         paned.add(right, weight=2)
 
         # 控制条
-        ctrl = ttk.Frame(self)
+        ctrl = ttk.Frame(parent)
         ctrl.pack(fill="x", padx=6, pady=6)
         self.btn_check = ttk.Button(ctrl, text="检查标定",
                                     command=self._on_check)
@@ -136,8 +167,31 @@ class MainWindow(ttk.Frame):
         self.progress_label.pack(side="right")
 
         # 日志
-        self.log_panel = LogPanel(self)
+        self.log_panel = LogPanel(parent)
         self.log_panel.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+    def _build_calib_page(self, parent: ttk.Frame) -> None:
+        """标定页：实时拍摄 + 质量检测 + 自动标定。"""
+        from .calibration import CalibrationPanel
+
+        self.calib_panel = CalibrationPanel(parent, self.cfg)
+        self.calib_panel.pack(fill="both", expand=True)
+
+    def _switch_page(self) -> None:
+        """切换测量页 / 标定页。"""
+        if self._page.get() == "calibration":
+            self._page_measure.lower()
+            self._page_calib.lift()
+            self.status.configure(text="标定界面")
+        else:
+            # 离开标定页时停止实时取景，释放相机
+            try:
+                self.calib_panel.on_hide()
+            except Exception:  # noqa: BLE001
+                pass
+            self._page_calib.lower()
+            self._page_measure.lift()
+            self.status.configure(text="就绪")
 
     def _build_statusbar(self) -> None:
         self.status = ttk.Label(self, text="就绪", relief="sunken",
@@ -179,6 +233,11 @@ class MainWindow(ttk.Frame):
         with open(path, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
         self._append_log(f"已保存配置: {path}")
+
+    def _goto_calibration(self) -> None:
+        """菜单动作：切到标定界面。"""
+        self._page.set("calibration")
+        self._switch_page()
 
     def _open_output_dir(self) -> None:
         path = self.cfg.resolve("output.result_dir", self.cfg.root)

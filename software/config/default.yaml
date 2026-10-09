@@ -79,6 +79,7 @@ output:
   pointcloud_dir: "data/pointclouds"
   mesh_dir: "data/meshes"
   result_dir: "data/results"
+  calib_dir: "data/calibration"   # 标定拍摄的图片归档目录
   log_dir: "logs"
 
 # ---------------------------------------------------------------------------

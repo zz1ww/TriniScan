@@ -6,8 +6,10 @@
 """
 from .camera_calib import (
     CameraCalibResult,
+    ChessboardDetection,
     calibrate_camera,
     calibrate_camera_from_files,
+    detect_chessboard_quality,
     load_camera_calib,
     save_camera_calib,
 )
@@ -28,6 +30,7 @@ from .axis_calib import (
 __all__ = [
     "CameraCalibResult", "calibrate_camera",
     "calibrate_camera_from_files",
+    "detect_chessboard_quality", "ChessboardDetection",
     "load_camera_calib", "save_camera_calib",
     "LaserCalibResult", "calibrate_laser_plane",
     "load_laser_calib", "save_laser_calib",

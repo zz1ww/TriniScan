@@ -33,6 +33,8 @@ __all__ = [
     "CameraCalibResult",
     "calibrate_camera",
     "calibrate_camera_from_files",
+    "detect_chessboard_quality",
+    "ChessboardDetection",
     "save_camera_calib",
     "load_camera_calib",
     "make_object_points",
@@ -47,6 +49,21 @@ _SUBPIX_CRITERIA = (
 # ---------------------------------------------------------------------------
 # 数据结构
 # ---------------------------------------------------------------------------
+@dataclass
+class ChessboardDetection:
+    """单幅图像的棋盘格检测与质量评价结果。"""
+
+    found: bool                        # 是否检测到棋盘格
+    corners: Optional[np.ndarray]      # (N,2) 亚像素角点，未检测到为 None
+    area_ratio: float                  # 角点凸包面积 / 图像面积
+    min_side_px: float                 # 相邻角点最小间距（像素）
+    sharpness: float                   # 拉普拉斯方差（清晰度）
+
+    @property
+    def num_corners(self) -> int:
+        return 0 if self.corners is None else int(len(self.corners))
+
+
 @dataclass
 class CameraCalibResult:
     """相机标定结果。"""
@@ -204,6 +221,68 @@ def calibrate_camera_from_files(
     return calibrate_camera(
         images, pattern_cols, pattern_rows, square_size_m, out_path, show
     )
+
+
+def detect_chessboard_quality(
+    image: np.ndarray,
+    pattern_cols: int = 9,
+    pattern_rows: int = 6,
+) -> "ChessboardDetection":
+    """检测单幅图像中的棋盘格并给出质量评价。
+
+    供交互式标定拍摄使用：拍一张即可立刻知道该帧是否可用。
+
+    Parameters
+    ----------
+    image : 图像（BGR 或灰度 np.ndarray）
+    pattern_cols, pattern_rows : 棋盘格内角点列数、行数
+
+    Returns
+    -------
+    ChessboardDetection
+        含是否成功、角点像素、以及若干质量指标。
+    """
+    gray = image if image.ndim == 2 else cv2.cvtColor(
+        image, cv2.COLOR_BGR2GRAY)
+    pattern_size = (int(pattern_cols), int(pattern_rows))
+    corners = _detect_corners(gray, pattern_size)
+    if corners is None:
+        return ChessboardDetection(
+            found=False, corners=None, area_ratio=0.0,
+            min_side_px=0.0, sharpness=0.0,
+        )
+
+    pts = corners.reshape(-1, 2).astype(np.float64)
+    # 棋盘格在图像中占据的面积占比（粗略：角点凸包面积 / 图像面积）
+    try:
+        hull = cv2.convexHull(pts.astype(np.float32))
+        area_ratio = float(cv2.contourArea(hull)) / float(
+            gray.shape[0] * gray.shape[1])
+    except cv2.error:  # pragma: no cover - 极端退化情形
+        area_ratio = 0.0
+    # 相邻角点最小间距（像素），用于判断是否离得太远/太小
+    min_side = _min_adjacent_spacing(pts, pattern_cols, pattern_rows)
+    # 清晰度：拉普拉斯方差（越大越清晰）
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    return ChessboardDetection(
+        found=True, corners=pts, area_ratio=area_ratio,
+        min_side_px=min_side, sharpness=sharpness,
+    )
+
+
+def _min_adjacent_spacing(pts: np.ndarray, cols: int,
+                          rows: int) -> float:
+    """角点阵列中相邻（水平/垂直）角点的最小间距（像素）。"""
+    grid = pts.reshape(rows, cols, 2)
+    d = []
+    if cols > 1:
+        d.append(np.linalg.norm(np.diff(grid, axis=1), axis=2).ravel())
+    if rows > 1:
+        d.append(np.linalg.norm(np.diff(grid, axis=0), axis=2).ravel())
+    if not d:
+        return 0.0
+    return float(np.min(np.concatenate(d)))
 
 
 def _per_view_errors(obj_points, img_points, rvecs, tvecs,
