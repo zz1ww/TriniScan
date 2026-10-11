@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 authors = [{ name = "TriniScan Team" }]
 dependencies = [
     "numpy>=1.24",
+    # OpenCV 4.8+ 与 5.x 均已适配（点集形状统一见 camera_calib.as_point_array）
     "opencv-python>=4.8",
     "scipy>=1.10",
     "open3d>=0.17",

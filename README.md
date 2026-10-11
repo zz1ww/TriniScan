@@ -176,7 +176,8 @@ TriniScan/
                    结果显示 / 记录
 ```
 
-**软件栈**：Python 3.10+ / OpenCV / NumPy / SciPy / Open3D / trimesh / pyserial
+**软件栈**：Python 3.10+ / OpenCV 4.8+（兼容 5.x）/ NumPy / SciPy /
+Open3D / trimesh / pyserial
 
 ---
 
@@ -187,6 +188,19 @@ TriniScan/
 ```bash
 pip install -r software/requirements.txt
 ```
+
+> **务必固定用一个 Python 解释器。** 机器上常装多个 Python，
+> 各自可能带不同版本的 OpenCV（4.x / 5.x）。用 A 装依赖、用 B 跑
+> 程序，会出现"我这边好好的、你那边报错"的假象。
+>
+> ```bash
+> py -3.12 -m pip install -r software/requirements.txt
+> py -3.12 -m triniscan.ui
+> ```
+>
+> Python 3.8 已停止支持（EOL），建议用 **3.10 及以上**。
+> OpenCV **4.8+ 与 5.x 均已适配**；如遇疑难标定报错，可临时
+> 锁到 4.x：`pip install "opencv-python>=4.8,<5.0"`。
 
 ### 2. 固件烧录
 

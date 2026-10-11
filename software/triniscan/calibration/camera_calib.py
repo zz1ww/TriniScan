@@ -38,6 +38,7 @@ __all__ = [
     "save_camera_calib",
     "load_camera_calib",
     "make_object_points",
+    "as_point_array",
 ]
 
 _FIND_FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
@@ -108,6 +109,37 @@ def _detect_corners(gray: np.ndarray, pattern_size: tuple[int, int]):
     )
 
 
+def as_point_array(points) -> np.ndarray:
+    """把任意形状的坐标统一为 ``(N, 1, 2)`` float32 点集。
+
+    为什么需要
+    ----------
+    ``cv2`` 的二维点集有约定形状 ``(N, 1, 2)``，对应类型 ``CV_32FC2``。
+    若某一组点被拉平成 ``(2N,)``，OpenCV 会视其为 ``CV_32FC1``；
+    此时再与标准点集一起传给 :func:`cv2.norm`、:func:`cv2.projectPoints`
+    等函数，会因**通道数不一致**报错：
+
+    - OpenCV 4.x：多数情况下能容忍，静默通过；
+    - OpenCV 5.x：严格校验，抛出
+      ``Input type mismatch (expected: _src1.type() == _src2.type())``。
+
+    本函数把输入规整为唯一表示，从而在 4.x / 5.x 上行为一致。
+
+    Parameters
+    ----------
+    points : 任意可解析为二维坐标的输入
+        - ``(N, 2)`` / ``(N, 1, 2)`` / ``(2N,)`` / ``(N, 1, 2, 1)``；
+        - 列表、元组、``np.ndarray`` 均可。
+
+    Returns
+    -------
+    np.ndarray
+        形状 ``(N, 1, 2)``、类型 ``float32``、C 连续的数组。
+    """
+    arr = np.ascontiguousarray(points, dtype=np.float32)
+    return arr.reshape(-1, 1, 2)
+
+
 # ---------------------------------------------------------------------------
 # 主标定流程
 # ---------------------------------------------------------------------------
@@ -167,6 +199,12 @@ def calibrate_camera(
         )
     if image_size is None:
         raise RuntimeError("无有效图像")
+
+    # 统一角点表示，避免 OpenCV 5.x 因点集形状/通道不一致而报错。
+    # 物点 (N,3) float32；像点 (N,1,2) float32。
+    obj_points = [np.ascontiguousarray(o, dtype=np.float32).reshape(-1, 3)
+                  for o in obj_points]
+    img_points = [as_point_array(p) for p in img_points]
 
     rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(
         obj_points, img_points, image_size, None, None
@@ -287,13 +325,21 @@ def _min_adjacent_spacing(pts: np.ndarray, cols: int,
 
 def _per_view_errors(obj_points, img_points, rvecs, tvecs,
                      K, dist) -> list[float]:
+    """逐视角重投影误差（像素 RMS）。
+
+    ``cv2.projectPoints`` 返回标准点集 ``(N,1,2)``（``CV_32FC2``），
+    而传入的 ``img_points[i]`` 形状可能不统一。OpenCV 5.x 下两者
+    通道数若不同会直接报错，故这里先统一形状再比较。
+    """
     errors = []
     for i in range(len(obj_points)):
         projected, _ = cv2.projectPoints(
             obj_points[i], rvecs[i], tvecs[i], K, dist
         )
-        err = cv2.norm(img_points[i], projected, cv2.NORM_L2) / \
-            len(projected)
+        # 统一为 (N,1,2) float32，兼容 OpenCV 4.x / 5.x
+        ref = as_point_array(img_points[i])
+        proj = as_point_array(projected)
+        err = cv2.norm(ref, proj, cv2.NORM_L2) / max(len(proj), 1)
         errors.append(float(err))
     return errors
 

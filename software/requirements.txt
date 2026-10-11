@@ -1,5 +1,7 @@
 # TriniScan 上位机依赖
 numpy>=1.24
+# OpenCV 4.8+ 与 5.x 均已适配；若遇到奇怪的标定报错，
+# 可临时锁到 4.x：opencv-python>=4.8,<5.0
 opencv-python>=4.8
 scipy>=1.10
 open3d>=0.17
