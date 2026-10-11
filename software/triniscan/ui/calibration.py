@@ -272,14 +272,20 @@ class CalibrationPanel(ttk.Frame):
         self._capturing = True
         self.btn_live.configure(text="停止拍摄")
         self.btn_shoot.configure(state="normal")
+        # 打开相机（尤其 MSMF 后端）首次需数秒协商参数，先给出提示，
+        # 避免用户以为界面卡死
+        self.lbl_status.configure(text="正在打开相机…")
 
         def _run() -> None:
             try:
                 from ..camera import Camera
                 with Camera(self.cfg.raw["camera"]) as cam:
                     self._camera = cam
+                    self._queue.put(("live_started", None))
                     while not self._live_stop.is_set():
-                        img = cam.grab()
+                        # 用 read() 而非 grab()：实时取景只取最新帧，
+                        # 不应逐帧丢弃（否则有效帧率被除以丢弃数）
+                        img = cam.read()
                         self._queue.put(("frame", img))
             except Exception as exc:  # noqa: BLE001
                 self._queue.put(("error", f"相机错误: {exc}"))
@@ -482,17 +488,20 @@ class CalibrationPanel(ttk.Frame):
     # 队列轮询（UI 线程）
     # ------------------------------------------------------------------
     def _poll(self) -> None:
+        latest_frame = None
         try:
             while True:
                 kind, payload = self._queue.get_nowait()
-                if kind == "frame":
-                    self.preview.set_image(payload)
-                    # 实时取景下按固定节奏存"最新帧"，供拍摄按钮取用
-                    self._latest_frame = payload
+                if kind == "live_started":
+                    self.lbl_status.configure(text="实时取景中")
+                elif kind == "frame":
+                    # 只保留最新帧：若累积多帧，丢弃旧的，避免界面"追帧"卡顿
+                    latest_frame = payload
                 elif kind == "shoot":
-                    if self._latest_frame is not None:
-                        self._handle_frame(self._latest_frame,
-                                           do_eval=True)
+                    if (latest_frame or self._latest_frame) is not None:
+                        self._handle_frame(
+                            latest_frame or self._latest_frame,
+                            do_eval=True)
                 elif kind == "live_stopped":
                     self._capturing = False
                     self.btn_live.configure(text="开始拍摄")
@@ -528,6 +537,9 @@ class CalibrationPanel(ttk.Frame):
                     self._append_verdict(payload)
         except queue.Empty:
             pass
+        if latest_frame is not None:
+            self._latest_frame = latest_frame
+            self.preview.set_image(latest_frame)
         self.after(_LIVE_INTERVAL_MS, self._poll)
 
     # ------------------------------------------------------------------

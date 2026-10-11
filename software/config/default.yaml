@@ -1,102 +1,87 @@
-# TriniScan 默认配置
-# 单位约定：长度 m，角度 度，时间 s（除特别说明）
-
-# ---------------------------------------------------------------------------
 camera:
-  index: 0
-  backend: "dshow"          # Windows: dshow | 其他平台: any
+  index: 1
+  # 后端：msmf | dshow | any
+  #   msmf  : Windows Media Foundation，支持 MJPG 压缩流，1080p 可达约 30fps
+  #   dshow : DirectShow，锁曝光最稳，但常只能跑未压缩 YUY2，1080p 仅约 5fps
+  backend: msmf
   width: 1920
   height: 1080
-  auto_exposure: false      # 必须锁定曝光
-  exposure: -6              # 依相机而定，需实测标定
+  # 像素格式：MJPG 走压缩、带宽小、帧率高；YUY2 未压缩、帧率低
+  fourcc: MJPG
+  # 目标帧率（0 表示不设置）
+  fps: 30
+  auto_exposure: false
+  exposure: -6
   gain: 0
-  auto_wb: false            # 必须锁定白平衡
-  discard_frames: 3         # 每次抓图前丢弃的帧数（等曝光稳定）
-
-# ---------------------------------------------------------------------------
+  auto_wb: false
+  # 抓图时丢弃的帧数（仅 grab() 用；实时取景用 read() 不丢弃）
+  discard_frames: 3
 turntable:
-  port: "COM3"
+  port: COM9
   baudrate: 115200
-  steps_per_rev: 200        # 电机整步/圈（1.8° 步距角）
-  microstep: 32             # 驱动器细分
-  gear_ratio: 5.0           # 机械减速比
-  settle_ms: 200            # 到位稳定延时
-  timeout_s: 5.0            # 单条指令超时
-
-# ---------------------------------------------------------------------------
+  steps_per_rev: 200
+  microstep: 32
+  gear_ratio: 5.18
+  settle_ms: 200
+  timeout_s: 5.0
 scan:
-  angle_step_deg: 2.0       # 每视角转过的角度
-  num_views: 180            # 视角数 = 360 / angle_step_deg
-  timeout_s: 60             # 单件测量总时限
-
-# ---------------------------------------------------------------------------
+  angle_step_deg: 2.0
+  num_views: 180
+  timeout_s: 60
 calibration:
-  camera_file: "software/config/calib_camera.npz"
-  laser_file: "software/config/calib_laser.npz"
-  axis_file: "software/config/calib_axis.npz"
-
+  camera_file: software/config/calib_camera.npz
+  laser_file: software/config/calib_laser.npz
+  axis_file: software/config/calib_axis.npz
 camera_calib:
-  pattern_cols: 9           # 棋盘格内角点数（列）
-  pattern_rows: 6           # 棋盘格内角点数（行）
-  square_size_m: 0.020      # 方格实际尺寸 (m)
-  images_glob: "assets/calibration_targets/chessboard/*.png"
-
-# ---------------------------------------------------------------------------
-# 转轴现场标定（"放球即可测"）
+  # 棋盘格**内角点**列数 / 行数（不是方格数！）
+  # 常用打印板：内角点 9x6（对应方格 10x7）、11x8 等，
+  # 必须与实物一致，否则永远检测不到。
+  pattern_cols: 9
+  pattern_rows: 6
+  # 单个方格边长（米）
+  square_size_m: 0.01
+  images_glob: assets/calibration_targets/chessboard/*.png
 axis_calib:
-  sphere_radius_m: 0.020    # 标记球半径 (m)；乒乓球直径 40mm -> 半径 0.020
-  method: "peak"            # peak(最亮极点) | sphere(球心)
-  num_views: 12             # 采样角度数（全周均分）
-  step_deg: 30.0            # 每步转角 = 360/num_views（可覆盖）
-  min_views: 3              # 最少有效视角
-  settle_ms: 250            # 转台到位后等待稳定 (ms)
-  spot_threshold: 60.0      # peak 法：亮点灰度下限（相对背景）
-  spot_win_px: 25           # peak 法：亮点搜索窗口半径 (px)
-  min_radius_px: 8.0        # sphere 法：球轮廓最小半径 (px)
-  max_radius_px: 240.0      # sphere 法：球轮廓最大半径 (px)
-  archive_dir: "data/calibration/axis"   # 现场标定点的存档目录
-
-# ---------------------------------------------------------------------------
+  sphere_radius_m: 0.02
+  method: peak
+  num_views: 12
+  step_deg: 30.0
+  min_views: 3
+  settle_ms: 250
+  spot_threshold: 60.0
+  spot_win_px: 25
+  min_radius_px: 8.0
+  max_radius_px: 240.0
+  archive_dir: data/calibration/axis
 laser:
   wavelength_nm: 650
   power_mw: 1.0
-  safety_class: 2           # 安全等级标注（需在装置上标明）
-
-# ---------------------------------------------------------------------------
-# 中心线提取
+  safety_class: 2
 extraction:
-  method: "steger"          # steger | gray_centroid | peak
-  threshold: 60.0           # 激光亮度阈值（绝对灰度）
-  smooth_sigma: 1.5         # 预处理高斯平滑
-  steger_sigma: 1.5         # Steger 微分尺度
-  min_pixels: 1             # 每列视为有效条纹的最少像素
-  min_points: 50            # 每视角有效点的下限
-  invert: false             # 亮背景上的暗线请设 true
-  roi: null                 # [x, y, w, h] 或 null（全图）
-
-# ---------------------------------------------------------------------------
+  method: steger
+  threshold: 60.0
+  smooth_sigma: 1.5
+  steger_sigma: 1.5
+  min_pixels: 1
+  min_points: 50
+  invert: false
+  roi: null
 reconstruction:
-  voxel_size: 0.0005        # 下采样/配准体素 (m)
-  icp_refine: true          # 相邻视角 ICP 精配准
-  poisson_depth: 9          # Poisson 八叉树深度
-  density_quantile: 0.02    # 裁剪最低密度面片的分位
-
-# ---------------------------------------------------------------------------
+  voxel_size: 0.0005
+  icp_refine: true
+  poisson_depth: 9
+  density_quantile: 0.02
 volume:
-  method: "divergence"      # divergence | voxel
-  voxel_pitch: 0.001        # 体素法校核体素尺寸 (m)
-  cross_check: true         # 散度定理后用体素法校核
-  unit: "cm3"
-
-# ---------------------------------------------------------------------------
+  method: divergence
+  voxel_pitch: 0.001
+  cross_check: true
+  unit: cm3
 output:
-  raw_dir: "data/raw"
-  pointcloud_dir: "data/pointclouds"
-  mesh_dir: "data/meshes"
-  result_dir: "data/results"
-  calib_dir: "data/calibration"   # 标定拍摄的图片归档目录
-  log_dir: "logs"
-
-# ---------------------------------------------------------------------------
+  raw_dir: data/raw
+  pointcloud_dir: data/pointclouds
+  mesh_dir: data/meshes
+  result_dir: data/results
+  calib_dir: data/calibration
+  log_dir: logs
 logging:
-  level: "INFO"
+  level: INFO

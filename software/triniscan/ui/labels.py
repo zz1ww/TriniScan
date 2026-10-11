@@ -41,6 +41,8 @@ FIELD_LABELS: dict[str, str] = {
     "camera.backend": "采集后端",
     "camera.width": "图像宽度",
     "camera.height": "图像高度",
+    "camera.fourcc": "像素格式",
+    "camera.fps": "目标帧率",
     "camera.auto_exposure": "自动曝光",
     "camera.exposure": "曝光值",
     "camera.gain": "增益",
@@ -127,7 +129,9 @@ FIELD_LABELS: dict[str, str] = {
 
 FIELD_HINTS: dict[str, str] = {
     "camera.index": "多摄像头时依次尝试 0、1、2",
-    "camera.backend": "Windows 用 dshow，其它平台用 any",
+    "camera.backend": "msmf 帧率高(推荐)；dshow 锁曝光稳但帧率低",
+    "camera.fourcc": "MJPG 压缩省带宽、帧率高；YUY2 不压缩、帧率低",
+    "camera.fps": "目标采集帧率，0 表示不限制",
     "camera.auto_exposure": "必须关闭，否则激光亮度会漂移",
     "camera.exposure": "依相机而定，需实测：过曝则调小",
     "camera.auto_wb": "必须关闭，保证各视角颜色一致",

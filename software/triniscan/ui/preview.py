@@ -12,6 +12,11 @@ from typing import Optional
 
 import numpy as np
 
+#: 预览图长边上限（像素）。超过则先降采样再交给 matplotlib，
+#: 显著降低逐帧重绘开销（1080p 全尺寸重绘会卡顿）。
+_PREVIEW_MAX_SIDE = 720
+
+
 def _setup_cjk_font() -> None:
     """让 matplotlib 能显示中文（Windows/Linux 常见中文字体）。"""
     from matplotlib import font_manager, rcParams
@@ -94,8 +99,28 @@ class PreviewPanel(ttk.LabelFrame):
         else:
             self._draw_cloud()
 
-    def set_image(self, image: np.ndarray) -> None:
-        """更新激光图像（BGR 或灰度）。"""
+    def set_image(self, image: np.ndarray,
+                  max_side: Optional[int] = _PREVIEW_MAX_SIDE) -> None:
+        """更新激光图像（BGR 或灰度）。
+
+        Parameters
+        ----------
+        image : 待显示的图像。
+        max_side : 长边超过该值时先降采样再显示。matplotlib 每次重绘
+            的成本随像素数增长，1080p 全尺寸逐帧重绘会明显卡顿；
+            预览只需看清轮廓，降到约 720px 足够，且不影响检测精度
+            （检测用的是原图）。
+        """
+        if max_side and image is not None:
+            h, w = image.shape[:2]
+            longest = max(h, w)
+            if longest > max_side:
+                scale = max_side / float(longest)
+                size = (max(1, int(round(w * scale))),
+                        max(1, int(round(h * scale))))
+                import cv2
+                interp = (cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+                image = cv2.resize(image, size, interpolation=interp)
         self._image = image
         if self._mode.get() == "image":
             self._draw_image()
