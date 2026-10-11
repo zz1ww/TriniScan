@@ -1,20 +1,14 @@
 camera:
   index: 1
-  # 后端：msmf | dshow | any
-  #   msmf  : Windows Media Foundation，支持 MJPG 压缩流，1080p 可达约 30fps
-  #   dshow : DirectShow，锁曝光最稳，但常只能跑未压缩 YUY2，1080p 仅约 5fps
   backend: msmf
   width: 1920
   height: 1080
-  # 像素格式：MJPG 走压缩、带宽小、帧率高；YUY2 未压缩、帧率低
   fourcc: MJPG
-  # 目标帧率（0 表示不设置）
   fps: 30
   auto_exposure: false
   exposure: -6
   gain: 0
   auto_wb: false
-  # 抓图时丢弃的帧数（仅 grab() 用；实时取景用 read() 不丢弃）
   discard_frames: 3
 turntable:
   port: COM9
@@ -33,12 +27,8 @@ calibration:
   laser_file: software/config/calib_laser.npz
   axis_file: software/config/calib_axis.npz
 camera_calib:
-  # 棋盘格**内角点**列数 / 行数（不是方格数！）
-  # 常用打印板：内角点 9x6（对应方格 10x7）、11x8 等，
-  # 必须与实物一致，否则永远检测不到。
-  pattern_cols: 9
-  pattern_rows: 6
-  # 单个方格边长（米）
+  pattern_cols: 11
+  pattern_rows: 8
   square_size_m: 0.01
   images_glob: assets/calibration_targets/chessboard/*.png
 axis_calib:

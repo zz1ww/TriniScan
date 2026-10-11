@@ -498,10 +498,12 @@ class CalibrationPanel(ttk.Frame):
                     # 只保留最新帧：若累积多帧，丢弃旧的，避免界面"追帧"卡顿
                     latest_frame = payload
                 elif kind == "shoot":
-                    if (latest_frame or self._latest_frame) is not None:
-                        self._handle_frame(
-                            latest_frame or self._latest_frame,
-                            do_eval=True)
+                    # 注意：不能用 `latest_frame or self._latest_frame`，
+                    # numpy 数组的布尔求值会抛 ValueError（歧义）。
+                    frame = latest_frame if latest_frame is not None \
+                        else self._latest_frame
+                    if frame is not None:
+                        self._handle_frame(frame, do_eval=True)
                 elif kind == "live_stopped":
                     self._capturing = False
                     self.btn_live.configure(text="开始拍摄")
@@ -537,10 +539,18 @@ class CalibrationPanel(ttk.Frame):
                     self._append_verdict(payload)
         except queue.Empty:
             pass
+        except Exception as exc:  # noqa: BLE001
+            # 单个消息处理出错不应中断轮询，否则界面会永久卡死
+            log.exception("处理消息失败: %s", exc)
+            self._append_verdict(f"[错误] {exc}")
         if latest_frame is not None:
             self._latest_frame = latest_frame
             self.preview.set_image(latest_frame)
-        self.after(_LIVE_INTERVAL_MS, self._poll)
+        # 无论上面是否出错，都要重新排队；否则预览会一卡到底
+        try:
+            self.after(_LIVE_INTERVAL_MS, self._poll)
+        except Exception:  # noqa: BLE001 - 窗口已销毁
+            pass
 
     # ------------------------------------------------------------------
     def on_hide(self) -> None:
