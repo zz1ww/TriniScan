@@ -44,7 +44,8 @@ TriniScan/                                  ← 项目根
 │   └── triniscan/               主程序包
 │       ├── __init__.py
 │       ├── core/                核心
-│       │   ├── config.py        配置加载
+│       │   ├── config.py        配置加载 / 访问 / 保存
+│       │   ├── config_store.py  配置唯一来源（界面↔业务共享，可落盘）
 │       │   ├── pipeline.py      ★ 单件测量主流程
 │       │   └── main.py          程序入口
 │       ├── camera/              相机

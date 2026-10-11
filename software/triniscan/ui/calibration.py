@@ -45,11 +45,25 @@ _LIVE_INTERVAL_MS = 60
 
 
 class CalibrationPanel(ttk.Frame):
-    """标定面板：实时拍摄 + 质量检测 + 自动标定。"""
+    """标定面板：实时拍摄 + 质量检测 + 自动标定。
+
+    Parameters
+    ----------
+    master : 父控件。
+    cfg : :class:`~triniscan.core.config_store.ConfigStore` 实例
+        （也兼容直接传 ``Config``，内部会自动包装）。
+        **面板通过它读写配置**，因此与测量页共享同一份参数。
+    """
 
     def __init__(self, master: tk.Misc, cfg) -> None:
         super().__init__(master)
-        self.cfg = cfg
+        from ..core.config_store import ConfigStore
+        if isinstance(cfg, ConfigStore):
+            self.store = cfg
+        else:
+            self.store = ConfigStore(cfg)
+        self.cfg = self.store.cfg
+
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._session: Optional[CaptureSession] = None
         self._camera = None
@@ -60,14 +74,57 @@ class CalibrationPanel(ttk.Frame):
         self._busy = False               # 标定进行中
 
         self._mode = tk.StringVar(value=CalibMode.CAMERA.value)
-        # 转轴现场标定的参数（可在界面配置）
-        self._sphere_radius_mm = tk.StringVar(value="20.0")
-        self._axis_method = tk.StringVar(value="peak")
-        self._axis_views = tk.StringVar(value="12")
+        # 转轴现场标定的参数（可在界面配置，初值取自配置）
+        self._sphere_radius_mm = tk.StringVar(
+            value=self._cfg_str("axis_calib.sphere_radius_m", 0.020,
+                                scale=1000.0))
+        self._axis_method = tk.StringVar(
+            value=self._cfg_str("axis_calib.method", "peak"))
+        self._axis_views = tk.StringVar(
+            value=self._cfg_str("axis_calib.num_views", 12))
         self._axis_sweep_active = False
         self._axis_stop = False
         self._build_ui()
         self._poll()
+
+    # ------------------------------------------------------------------
+    # 配置读取辅助
+    # ------------------------------------------------------------------
+    def _cfg_str(self, key: str, default, scale: float = 1.0) -> str:
+        """把配置值取出来，格式化给输入框显示（可选缩放）。"""
+        value = self.cfg.get(key, default)
+        try:
+            return str(round(float(value) * scale, 6))
+        except (TypeError, ValueError):
+            return str(value)
+
+    def on_config_changed(self) -> None:
+        """外部配置变化时刷新本面板显示（由主窗口调用）。
+
+        采用"不打断用户输入"的策略：只有当输入框当前内容**仍等于
+        上一次同步时的配置值**（即用户没改过它）才用新配置覆盖；
+        若用户正在编辑（值已偏离配置），则保留用户的输入。
+        """
+        self.cfg = self.store.cfg
+        self._sync_var(
+            self._sphere_radius_mm, "axis_calib.sphere_radius_m",
+            default=0.020, scale=1000.0)
+        self._sync_var(
+            self._axis_method, "axis_calib.method", default="peak")
+        self._sync_var(
+            self._axis_views, "axis_calib.num_views", default=12)
+
+    def _sync_var(self, var: tk.StringVar, key: str, default,
+                  scale: float = 1.0) -> None:
+        """把配置值同步到输入框，但不覆盖用户的临时编辑。
+
+        若输入框为空，或当前值等于配置值（说明用户没改），则刷新；
+        否则保留用户已输入的临时值。
+        """
+        new_text = self._cfg_str(key, default, scale=scale)
+        if var.get() in ("", new_text):
+            var.set(new_text)
+        # 否则说明用户正在编辑，保留其输入
 
     # ------------------------------------------------------------------
     # 界面构建
@@ -314,7 +371,7 @@ class CalibrationPanel(ttk.Frame):
     # 转轴：全自动扫描
     # ------------------------------------------------------------------
     def _read_axis_params(self) -> bool:
-        """读取并校验界面上的转轴参数，写回配置。"""
+        """读取并校验界面上的转轴参数，写入 store（内存即时生效）。"""
         try:
             radius_mm = float(self._sphere_radius_mm.get())
             views = int(self._axis_views.get())
@@ -324,12 +381,13 @@ class CalibrationPanel(ttk.Frame):
         if radius_mm <= 0 or views < 3:
             messagebox.showerror("参数错误", "球半径需 > 0，角度数需 >= 3。")
             return False
-        try:
-            self.cfg.set("axis_calib.sphere_radius_m", radius_mm / 1000.0)
-            self.cfg.set("axis_calib.num_views", views)
-            self.cfg.set("axis_calib.method", self._axis_method.get())
-        except Exception:  # noqa: BLE001 - 配置对象可能只读
-            log.debug("配置对象不支持 set，使用默认参数")
+        # 通过 store 写入，界面会提示"未保存"，用户可一键落盘
+        self.store.update_many({
+            "axis_calib.sphere_radius_m": radius_mm / 1000.0,
+            "axis_calib.num_views": views,
+            "axis_calib.method": self._axis_method.get(),
+        })
+        self.cfg = self.store.cfg
         return True
 
     def _missing_prereqs(self) -> list:

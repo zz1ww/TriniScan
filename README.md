@@ -91,11 +91,11 @@ TriniScan/
 │   │   ├── extraction/          激光中心线提取（Steger/灰度重心）
 │   │   ├── reconstruction/      三角测量 + 点云配准/重建
 │   │   ├── volume/              网格封闭 + 体积计算
-│   │   ├── core/                主控流程 + 配置 + CLI
-│   │   ├── tools/               一键标定 / 提取预览工具
+│   │   ├── core/                主控流程 + 配置（ConfigStore）+ CLI
+│   │   ├── tools/               一键标定 / 提取预览 / 相机扫描工具
 │   │   └── ui/                  Tkinter 图形界面
 │   ├── config/                  参数配置文件
-│   └── tests/                   单元测试（47 用例）
+│   └── tests/                   单元测试
 │
 ├── assets/
 │   ├── calibration_targets/     标定靶（棋盘格等）
@@ -113,6 +113,23 @@ TriniScan/
 │   └── results/                 测量结果
 └── logs/                        运行日志
 ```
+
+---
+
+## 配置管理（ConfigStore）
+
+界面与业务模块**共用同一份配置**，改参数流程如下：
+
+```
+界面改参数 ─► ConfigStore.update() ─► 内存立即生效（测量/标定随即读到新值）
+                                  └─► 标记"未保存"
+点「💾 保存配置」 ─► ConfigStore.save() ─► 原子写回 default.yaml
+```
+
+- 主窗口、参数面板、标定面板持有**同一个** `ConfigStore` 实例；
+- `MainWindow.cfg` 始终返回 `store.cfg`，因此测量（`ScanPipeline`）与
+  标定（`CaptureSession`）读取的都是最新值；
+- 关闭窗口时若有未保存改动会提示保存。
 
 ---
 
@@ -202,6 +219,14 @@ python -m triniscan.ui          # 或 scripts\gui.bat
 界面提供：参数编辑 / 标定检查 / 单帧预览（图像 + 中心线）/
 一键测量 / 点云预览 / 实时日志 / 结果显示。耗时操作在后台线程执行，
 界面不卡死。
+
+**参数编辑与保存**：左侧参数面板可直接修改任意配置项：
+
+- 改动**立即在内存生效**——随后「开始测量」「标定」即使用新值；
+- 点控制条上的 **「💾 保存配置」**（或菜单 文件 → 保存）写回
+  `software/config/default.yaml`，下次启动仍生效；
+- 有未保存改动时按钮显示为「💾 保存配置\*」，状态栏同步提示；
+- 关闭窗口时若有未保存改动会询问是否保存。
 
 ### 5. 测试
 

@@ -173,17 +173,23 @@ class ConfigPanel(ttk.LabelFrame):
             return raw
         return raw
 
+    def set_value(self, key_path: str, value: Any) -> None:
+        """只更新单个字段的显示（用于外部配置变化时同步）。"""
+        var = self._vars.get(key_path)
+        if var is None:
+            return
+        if isinstance(value, bool):
+            var.set("是" if value else "否")
+        elif value is None:
+            var.set("")
+        else:
+            var.set(str(value))
+
     def refresh(self, cfg) -> None:
         """用新配置刷新所有字段。"""
         self._cfg = cfg
-        for key_path, var in self._vars.items():
-            value = cfg.get(key_path)
-            if isinstance(value, bool):
-                var.set("是" if value else "否")
-            elif value is None:
-                var.set("")
-            else:
-                var.set(str(value))
+        for key_path in self._vars:
+            self.set_value(key_path, cfg.get(key_path))
 
 
 # ---------------------------------------------------------------------------

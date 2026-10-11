@@ -97,6 +97,38 @@ class Config(Mapping):
         """返回带覆盖的新配置。"""
         return Config(_deep_merge(self._data, overrides), root=self._root)
 
+    def save(self, path: str | None = None) -> str:
+        """把当前配置写回 YAML 文件。
+
+        Parameters
+        ----------
+        path : 目标路径；None 时写回加载时的原始路径
+               （``_meta.config_path``）。
+
+        Returns
+        -------
+        str
+            实际写入的文件路径。
+
+        Raises
+        ------
+        ValueError
+            既没给 ``path``，配置里也没有原始路径时。
+        """
+        path = path or self._data.get("_meta", {}).get("config_path")
+        if not path:
+            raise ValueError("未指定保存路径，且配置中无原始路径记录")
+        path = os.path.abspath(path)
+        # 写出时剔除私有的 _meta 段
+        data = {k: v for k, v in self._data.items()
+                if not k.startswith("_")}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True,
+                           sort_keys=False, default_flow_style=False)
+        os.replace(tmp, path)   # 原子替换，避免写坏原文件
+        return path
+
     # ------------------------------------------------------------------
     def __getitem__(self, key: str) -> Any:
         val = self._data[key]

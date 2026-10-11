@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 from .config import Config, find_project_root
+from .config_store import ConfigStore
 
-__all__ = ["Config", "find_project_root", "ScanPipeline", "ScanResult"]
+__all__ = ["Config", "ConfigStore", "find_project_root",
+           "ScanPipeline", "ScanResult"]
 
 
 def __getattr__(name: str):

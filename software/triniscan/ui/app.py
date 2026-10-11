@@ -1,5 +1,14 @@
 """主窗口：把所有面板、菜单、后台任务串起来。
 
+配置管理
+--------
+所有面板（参数配置、标定）与业务模块（测量、标定）共用**同一个**
+:class:`~triniscan.core.config_store.ConfigStore`：
+
+- 界面改参数 → ``store.update()`` → 内存立即生效，并通知各面板刷新；
+- 点"保存配置" → ``store.save()`` → 写回 ``default.yaml``；
+- 测量 / 标定读取「``store.cfg``」，因此**总是拿到最新值**。
+
 界面布局::
 
     ┌──────────────────────────────────────────────────────────┐
@@ -9,7 +18,7 @@
     │ (可编辑)       ├──────────────────────────────────────────┤
     │               │ 测量结果                                  │
     ├───────────────┴──────────────────────────────────────────┤
-    │ 控制条: [检查标定][预览单帧][开始测量][停止] 进度条         │
+    │ 控制条: [检查标定][预览单帧][开始测量][停止][保存配置]      │
     ├──────────────────────────────────────────────────────────┤
     │ 运行日志                                                  │
     └──────────────────────────────────────────────────────────┘
@@ -24,6 +33,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from ..core.config import Config, find_project_root
+from ..core.config_store import ConfigStore
 from ..common.logging_utils import get_logger, set_level
 from .panels import ConfigPanel, LogPanel, ResultPanel
 from .preview import PreviewPanel
@@ -37,10 +47,15 @@ APP_TITLE = "TriniScan — 激光三角测量三维体积测量系统"
 class MainWindow(ttk.Frame):
     """应用主窗口。"""
 
-    def __init__(self, master: tk.Tk, cfg: Config) -> None:
+    def __init__(self, master: tk.Tk,
+                 cfg: Config | ConfigStore) -> None:
         super().__init__(master)
         self.master = master
-        self.cfg = cfg
+        # 兼容直接传 Config 的调用方（如测试/旧脚本）
+        self.store = cfg if isinstance(cfg, ConfigStore) \
+            else ConfigStore(cfg)
+        self.store.add_listener(self._on_store_change)
+
         self._queue: "queue.Queue[TaskMessage]" = queue.Queue()
         self._worker: Optional[Worker] = None
         self._last_result = None
@@ -51,7 +66,16 @@ class MainWindow(ttk.Frame):
         self._build_layout()
         self._build_statusbar()
         self._switch_page()
+        self._update_dirty_hint()
         self._poll()
+
+    # ------------------------------------------------------------------
+    # 配置访问
+    # ------------------------------------------------------------------
+    @property
+    def cfg(self) -> Config:
+        """当前配置（始终取 store 里的最新值）。"""
+        return self.store.cfg
 
     # ------------------------------------------------------------------
     # 外观
@@ -74,7 +98,7 @@ class MainWindow(ttk.Frame):
 
         m_file = tk.Menu(menubar, tearoff=0)
         m_file.add_command(label="打开配置…", command=self._open_config)
-        m_file.add_command(label="另存配置…", command=self._save_config)
+        m_file.add_command(label="另存配置…", command=self._save_config_as)
         m_file.add_separator()
         m_file.add_command(label="退出", command=self.master.destroy)
         menubar.add_cascade(label="文件", menu=m_file)
@@ -160,6 +184,10 @@ class MainWindow(ttk.Frame):
                                    command=self._on_stop, state="disabled")
         self.btn_stop.pack(side="left")
 
+        self.btn_save_cfg = ttk.Button(ctrl, text="💾 保存配置",
+                                       command=self._on_save_config)
+        self.btn_save_cfg.pack(side="left", padx=(12, 4))
+
         self.progress = ttk.Progressbar(ctrl, mode="determinate",
                                         length=260)
         self.progress.pack(side="right", padx=6)
@@ -174,7 +202,7 @@ class MainWindow(ttk.Frame):
         """标定页：实时拍摄 + 质量检测 + 自动标定。"""
         from .calibration import CalibrationPanel
 
-        self.calib_panel = CalibrationPanel(parent, self.cfg)
+        self.calib_panel = CalibrationPanel(parent, self.store)
         self.calib_panel.pack(fill="both", expand=True)
 
     def _switch_page(self) -> None:
@@ -191,7 +219,10 @@ class MainWindow(ttk.Frame):
                 pass
             self._page_calib.lower()
             self._page_measure.lift()
-            self.status.configure(text="就绪")
+            if self.store.dirty:
+                self.status.configure(text="有未保存的配置改动")
+            else:
+                self.status.configure(text="就绪")
 
     def _build_statusbar(self) -> None:
         self.status = ttk.Label(self, text="就绪", relief="sunken",
@@ -199,40 +230,116 @@ class MainWindow(ttk.Frame):
         self.status.pack(fill="x", side="bottom")
 
     # ------------------------------------------------------------------
-    # 配置回调
+    # 配置回调（store 为唯一来源）
     # ------------------------------------------------------------------
     def _on_config_change(self, key_path: str, value) -> None:
-        self.cfg = self.cfg.with_overrides(_nest(key_path, value))
-        self._append_log(f"[配置] {key_path} = {value!r}")
+        """参数配置面板改了一个值 → 写入 store（内存立即生效）。"""
+        self.store.update(key_path, value)
+
+    def _on_store_change(self, store: ConfigStore,
+                         key_path: str, value) -> None:
+        """store 变化监听：同步面板显示 + 刷新"未保存"标记 + 记日志。"""
+        if key_path:
+            self._append_log(f"[配置] {key_path} = {value!r}（未保存）")
+            # 同步参数面板相应字段（用户正在编辑的字段值本就一致，
+            # 这里主要覆盖"标定页改了参数"等外部改动的情况）
+            panel = getattr(self, "config_panel", None)
+            if panel is not None:
+                try:
+                    panel.set_value(key_path, value)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("同步参数面板失败 (%s): %s", key_path, exc)
+        self._update_dirty_hint()
+
+    def _update_dirty_hint(self) -> None:
+        """在状态栏/按钮上提示"有未保存改动"。"""
+        btn = getattr(self, "btn_save_cfg", None)
+        if btn is not None:
+            btn.configure(
+                text="💾 保存配置*" if self.store.dirty else "💾 保存配置")
+        status = getattr(self, "status", None)
+        if status is not None and self.store.dirty \
+                and self._page.get() == "measure":
+            status.configure(text="有未保存的配置改动")
+
+    def _on_save_config(self) -> None:
+        """按钮/菜单：把当前配置写回 YAML 文件。"""
+        self.save_config_to_file()
+
+    def save_config_to_file(self, path: Optional[str] = None,
+                            quiet: bool = False) -> bool:
+        """把当前配置写入 YAML 文件（默认写回原文件）。
+
+        Returns
+        -------
+        bool
+            是否保存成功。
+        """
+        try:
+            written = self.store.save(path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("保存配置失败", str(exc))
+            return False
+        self._update_dirty_hint()
+        if not quiet:
+            messagebox.showinfo(
+                "配置已保存",
+                f"已写入：\n{written}\n\n"
+                "测量与标定都会立即使用该配置；下次启动也自动加载。")
+        return True
 
     # ------------------------------------------------------------------
     # 菜单/按钮动作
     # ------------------------------------------------------------------
     def _open_config(self) -> None:
+        if not self._confirm_discard():
+            return
         path = filedialog.askopenfilename(
             filetypes=[("YAML 配置", "*.yaml *.yml"), ("所有文件", "*.*")])
         if not path:
             return
         try:
-            self.cfg = Config.load(path)
+            cfg = Config.load(path)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("加载失败", str(exc))
             return
-        self.config_panel.refresh(self.cfg)
+        self.store.replace(cfg, config_path=os.path.abspath(path))
+        self._refresh_all_panels()
         self._append_log(f"已加载配置: {path}")
 
-    def _save_config(self) -> None:
-        import yaml
+    def _save_config_as(self) -> None:
+        """菜单：另存为新文件，并把绑定路径切到新文件。"""
         path = filedialog.asksaveasfilename(
             defaultextension=".yaml",
             filetypes=[("YAML 配置", "*.yaml"), ("所有文件", "*.*")])
         if not path:
             return
-        data = {k: v for k, v in self.cfg.raw.items()
-                if not k.startswith("_")}
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
-        self._append_log(f"已保存配置: {path}")
+        self.save_config_to_file(path)
+
+    def _refresh_all_panels(self) -> None:
+        """让所有面板按当前 store.cfg 重新显示。"""
+        try:
+            self.config_panel.refresh(self.store.cfg)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("刷新参数面板失败: %s", exc)
+        try:
+            self.calib_panel.on_config_changed()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("刷新标定面板失败: %s", exc)
+
+    def _confirm_discard(self) -> bool:
+        """有未保存改动时询问；返回 True 表示可以继续并已处理。"""
+        if not self.store.dirty:
+            return True
+        ans = messagebox.askyesnocancel(
+            "未保存的配置",
+            "当前有未保存的配置改动。\n\n"
+            "「是」= 先保存   「否」= 放弃改动   「取消」= 什么都不做")
+        if ans is None:
+            return False
+        if ans:
+            return self.save_config_to_file(quiet=True)
+        return True
 
     def _goto_calibration(self) -> None:
         """菜单动作：切到标定界面。"""
@@ -465,22 +572,12 @@ class MainWindow(ttk.Frame):
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
-        self.log_panel.append(text)
+        panel = getattr(self, "log_panel", None)
+        if panel is not None:
+            panel.append(text)
 
 
 # ---------------------------------------------------------------------------
-def _nest(key_path: str, value) -> dict:
-    """把 ``"a.b.c"`` 展开为 ``{"a": {"b": {"c": value}}}``。"""
-    parts = key_path.split(".")
-    node: dict = {}
-    cur = node
-    for p in parts[:-1]:
-        cur[p] = {}
-        cur = cur[p]
-    cur[parts[-1]] = value
-    return node
-
-
 def _make_result(vol, info=None):
     """由 ``VolumeResult``（+ 运行信息）组装界面展示用的轻量结果对象。
 
@@ -531,8 +628,26 @@ def launch(config_path: Optional[str] = None,
     root.minsize(900, 600)
 
     app = MainWindow(root, cfg)
+    # 关闭窗口时，若有未保存配置则询问
+    root.protocol("WM_DELETE_WINDOW",
+                  lambda: _on_close(root, app))
     app._append_log(f"项目根: {cfg.root}")
-    app._append_log("就绪。可在左侧编辑参数，然后点『检查标定』"
-                    "或『开始测量』。")
+    app._append_log(f"配置文件: {app.store.path}")
+    app._append_log("就绪。可在左侧编辑参数，改完点『💾 保存配置』"
+                    "写回文件；测量/标定始终使用当前配置。")
     root.mainloop()
     return 0
+
+
+def _on_close(root: tk.Tk, app: "MainWindow") -> None:
+    """窗口关闭钩子：提示保存未落盘的配置改动。"""
+    if app.store.dirty:
+        ans = messagebox.askyesnocancel(
+            "退出前保存？",
+            "有未保存的配置改动。\n\n"
+            "「是」= 保存并退出   「否」= 直接退出   「取消」= 返回")
+        if ans is None:
+            return
+        if ans and not app.save_config_to_file(quiet=True):
+            return
+    root.destroy()
