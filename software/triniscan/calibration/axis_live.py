@@ -278,7 +278,8 @@ class AxisLiveCollector:
     def __init__(self, K: np.ndarray, plane: np.ndarray,
                  sphere_radius_m: float = 0.020,
                  method: str = "peak",
-                 dist=None) -> None:
+                 dist=None,
+                 algo_cfg: Optional[dict] = None) -> None:
         if method not in ("peak", "sphere"):
             raise ValueError(
                 f"未知方法 '{method}'，可选 'peak' / 'sphere'")
@@ -288,6 +289,9 @@ class AxisLiveCollector:
                                                          dtype=np.float64)
         self.sphere_radius_m = float(sphere_radius_m)
         self.method = method
+        # 算法参数（阈值、窗口、半径范围等）——通过构造参数注入，
+        # 而不是外部偷偷写私有属性，保持封装完整。
+        self.algo_cfg: dict = dict(algo_cfg) if algo_cfg else {}
 
         self.points: list[np.ndarray] = []      # 已收集的 3D 点
         self.pixels: list[np.ndarray] = []      # 对应像素
@@ -314,7 +318,7 @@ class AxisLiveCollector:
     def find_pixel(self, image: np.ndarray,
                    roi: Optional[RegionOfInterest] = None) -> np.ndarray:
         """按当前方法找出标记点像素坐标。"""
-        cfg = getattr(self, "_algo_cfg", {})
+        cfg = self.algo_cfg
         if self.method == "peak":
             return detect_spot_peak(
                 image,
@@ -373,12 +377,18 @@ class AxisLiveCollector:
 
     def calibrate(self, out_path: Optional[str] = None,
                   save_points_to: Optional[str] = None):
-        """用收集到的点完成转轴标定（调用原有 ``calibrate_axis``）。"""
+        """用收集到的点完成转轴标定（调用原有 ``calibrate_axis``）。
+
+        传入采样角度以**固定转轴方向的符号**（右手定则），
+        避免多视角配准方向反向。
+        """
         from .axis_calib import calibrate_axis
 
         if save_points_to:
             self.save_points(save_points_to)
-        return calibrate_axis(self.stack, out_path=out_path)
+        angles = self.angles if len(self.angles) == self.count else None
+        return calibrate_axis(self.stack, out_path=out_path,
+                              angles_deg=angles)
 
     def add_angle(self, image: np.ndarray, angle_deg: float,
                   roi: Optional[RegionOfInterest] = None) -> np.ndarray:

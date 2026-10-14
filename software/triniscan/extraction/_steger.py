@@ -96,8 +96,10 @@ def _normal_and_offset(hxx, hxy, hyy, gx, gy):
 def steger_center(gray: np.ndarray, sigma: float,
                   threshold: float,
                   subpixel: bool = True,
-                  max_offset: float = 0.5) -> np.ndarray:
-    """Steger 法提取亚像素条纹中心（每列一个中心）。
+                  max_offset: float = 0.5,
+                  merge: str = "column",
+                  min_sep_px: float = 1.0) -> np.ndarray:
+    """Steger 法提取亚像素条纹中心。
 
     Parameters
     ----------
@@ -106,10 +108,16 @@ def steger_center(gray: np.ndarray, sigma: float,
     threshold : 灰度阈值（中心像素灰度须大于此值）
     subpixel : 是否做亚像素修正
     max_offset : 亚像素偏移上限（像素）
+    merge : 归并策略
+        - ``"column"``（默认）：每列一个中心，取该列曲率最强者，
+          与灰度重心法输出一致，向后兼容；
+        - ``"normal"``：按**条纹法向**做非极大抑制，允许同一列出现
+          多个中心，适合**倾斜/大曲率**激光线，避免欠采样。
+    min_sep_px : ``"normal"`` 策略下两中心的最小间距（像素）
 
     Returns
     -------
-    centers : (N, 2) 亚像素 (u, v)，按列升序
+    centers : (N, 2) 亚像素 (u, v)
     """
     rx, ry, rxx, rxy, ryy = steger_response(gray, sigma)
     height, width = gray.shape
@@ -127,14 +135,20 @@ def steger_center(gray: np.ndarray, sigma: float,
         t = np.zeros_like(t)
     valid &= gray > threshold
 
-    col_idx = np.arange(width)
+    if merge == "normal":
+        return _merge_by_normal(valid, t, nx, ny, r_nn, width,
+                                min_sep_px, subpixel, max_offset)
+
+    return _merge_by_column(valid, t, nx, ny, r_nn, width, subpixel)
+
+
+def _merge_by_column(valid, t, nx, ny, r_nn, width, subpixel):
+    """每列一个中心（取该列二阶导最负者）。"""
     centers = []
     for u in range(width):
         rows = np.nonzero(valid[:, u])[0]
         if rows.size == 0:
             continue
-        # 同一列可能多个候选（噪声/双峰），取"最像中心"者：
-        # 即沿法向二阶导最负（曲率最强）的点
         best = rows[np.argmin(r_nn[rows, u])]
         if subpixel:
             v = best + t[best, u] * ny[best, u]
@@ -146,3 +160,44 @@ def steger_center(gray: np.ndarray, sigma: float,
     if not centers:
         return np.empty((0, 2), dtype=np.float64)
     return np.asarray(centers, dtype=np.float64)
+
+
+def _merge_by_normal(valid, t, nx, ny, r_nn, width, min_sep_px,
+                     subpixel, max_offset):
+    """按条纹法向做非极大抑制（NMS），允许同列多中心。
+
+    算法：收集所有有效候选（含亚像素位置与"强度"= 沿法向二阶导的
+    负值，越负越像中心），按强度降序，贪心保留彼此间距不小于
+    ``min_sep_px`` 的候选。确定性、O(N log N)。
+    """
+    rows, cols = np.nonzero(valid)
+    if rows.size == 0:
+        return np.empty((0, 2), dtype=np.float64)
+
+    if subpixel:
+        vv = rows + t[rows, cols] * ny[rows, cols]
+        uu = cols + t[rows, cols] * nx[rows, cols]
+    else:
+        uu = cols.astype(np.float64)
+        vv = rows.astype(np.float64)
+
+    strength = -r_nn[rows, cols]          # 越大越像中心
+    pts = np.column_stack([uu, vv])
+
+    order = np.argsort(-strength)
+    sep2 = float(min_sep_px) ** 2
+    kept: list[np.ndarray] = []
+    for i in order:
+        p = pts[i]
+        if kept:
+            d2 = np.sum((np.asarray(kept) - p) ** 2, axis=1)
+            if np.any(d2 < sep2):
+                continue
+        kept.append(p)
+
+    if not kept:
+        return np.empty((0, 2), dtype=np.float64)
+    out = np.asarray(kept, dtype=np.float64)
+    # 按列（再按行）排序，便于后续处理
+    idx = np.lexsort((out[:, 1], out[:, 0]))
+    return out[idx]

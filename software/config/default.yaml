@@ -26,6 +26,7 @@ calibration:
   camera_file: software/config/calib_camera.npz
   laser_file: software/config/calib_laser.npz
   axis_file: software/config/calib_axis.npz
+  strict: false
 camera_calib:
   pattern_cols: 11
   pattern_rows: 8
@@ -33,7 +34,7 @@ camera_calib:
   images_glob: assets/calibration_targets/chessboard/*.png
 axis_calib:
   sphere_radius_m: 0.02
-  method: peak
+  method: sphere
   num_views: 12
   step_deg: 30.0
   min_views: 3
@@ -42,16 +43,31 @@ axis_calib:
   spot_win_px: 25
   min_radius_px: 8.0
   max_radius_px: 240.0
+  robust: true
   archive_dir: data/calibration/axis
+laser_calib:
+  robust: true
+  robust_method: irls
+  view_reject_mm: 1.0
+  outlier_mm: 0.5
 laser:
   wavelength_nm: 650
   power_mw: 1.0
   safety_class: 2
+quality:
+  camera_rms_good: 0.30
+  camera_rms_warn: 0.50
+  laser_rms_good: 0.30
+  laser_rms_warn: 0.50
+  axis_rms_good: 0.10
+  axis_rms_warn: 0.30
 extraction:
   method: steger
   threshold: 60.0
   smooth_sigma: 1.5
   steger_sigma: 1.5
+  steger_merge: normal
+  steger_min_sep_px: 1.0
   min_pixels: 1
   min_points: 50
   invert: false
@@ -59,8 +75,24 @@ extraction:
 reconstruction:
   voxel_size: 0.0005
   icp_refine: true
+  global_align: true
+  pose_graph: true
+  edge_span: 3
+  iterative_iters: 3
   poisson_depth: 9
+  adaptive_depth: true
+  orient_max_nn: 30
   density_quantile: 0.02
+  close_fallback: bottom_plane
+  allow_convex_hull: true
+  remove_turntable: true
+  turntable_plane_tol_m: 0.001
+  turntable_min_inlier: 0.15
+  turntable_align_tol_deg: 15.0
+  turntable_margin_m: 0.0005
+  turntable_band_below_m: 0.0015
+  turntable_keep_upper_only: true
+  turntable_radius_m: null
 volume:
   method: divergence
   voxel_pitch: 0.001

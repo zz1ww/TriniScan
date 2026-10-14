@@ -521,13 +521,14 @@ def sweep_axis_calibration(
 
     collector = AxisLiveCollector(
         cam.K, laser.plane, sphere_radius_m=radius,
-        method=method, dist=cam.dist)
-    collector._algo_cfg = {
-        "spot_threshold": float(_get("axis_calib.spot_threshold", 60.0)),
-        "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
-        "min_radius_px": float(_get("axis_calib.min_radius_px", 8.0)),
-        "max_radius_px": float(_get("axis_calib.max_radius_px", 240.0)),
-    }
+        method=method, dist=cam.dist,
+        algo_cfg={
+            "spot_threshold": float(_get("axis_calib.spot_threshold", 60.0)),
+            "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
+            "min_radius_px": float(_get("axis_calib.min_radius_px", 8.0)),
+            "max_radius_px": float(_get("axis_calib.max_radius_px", 240.0)),
+        },
+    )
 
     # --- 打开设备 ---
     if make_camera is None:

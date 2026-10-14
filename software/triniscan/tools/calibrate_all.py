@@ -102,14 +102,15 @@ def _cmd_axis_live(args, cfg) -> int:
 
     collector = AxisLiveCollector(
         cam.K, laser.plane, sphere_radius_m=radius,
-        method=method, dist=cam.dist)
-    collector._algo_cfg = {
-        "spot_threshold": float(
-            cfg.get("axis_calib.spot_threshold", 60.0)),
-        "spot_win_px": int(cfg.get("axis_calib.spot_win_px", 25)),
-        "min_radius_px": float(cfg.get("axis_calib.min_radius_px", 8.0)),
-        "max_radius_px": float(cfg.get("axis_calib.max_radius_px", 240.0)),
-    }
+        method=method, dist=cam.dist,
+        algo_cfg={
+            "spot_threshold": float(
+                cfg.get("axis_calib.spot_threshold", 60.0)),
+            "spot_win_px": int(cfg.get("axis_calib.spot_win_px", 25)),
+            "min_radius_px": float(cfg.get("axis_calib.min_radius_px", 8.0)),
+            "max_radius_px": float(cfg.get("axis_calib.max_radius_px", 240.0)),
+        },
+    )
 
     step = 360.0 / len(files)
     for idx, path in enumerate(files):

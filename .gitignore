@@ -20,7 +20,11 @@ data/raw/*
 data/pointclouds/*
 data/meshes/*
 data/results/*
+data/calibration/*
 !data/**/.gitkeep
+
+# 标定结果（与具体相机/转台绑定，属本机数据，不入库）
+software/config/*.npz
 
 logs/*
 !logs/.gitkeep

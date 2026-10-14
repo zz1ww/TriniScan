@@ -178,7 +178,9 @@ def extract_steger(gray: np.ndarray,
                    threshold: float = 60.0,
                    sigma: float = 1.5,
                    subpixel: bool = True,
-                   max_offset: float = 0.5) -> np.ndarray:
+                   max_offset: float = 0.5,
+                   merge: str = "column",
+                   min_sep_px: float = 1.0) -> np.ndarray:
     """Steger 法（Hessian 矩阵）提取条纹中心。
 
     实现委托给 :mod:`triniscan.extraction._steger`，使用解析高斯导数核，
@@ -191,14 +193,18 @@ def extract_steger(gray: np.ndarray,
     sigma : 微分尺度（与条纹半宽同量级最佳）
     subpixel : 是否做亚像素修正
     max_offset : 亚像素偏移的容许范围（像素）
+    merge : 归并策略，``"column"``（默认，每列一个）或 ``"normal"``
+        （按法向非极大抑制，支持倾斜/大曲率条纹）
+    min_sep_px : ``"normal"`` 策略下两中心最小间距（像素）
 
     Returns
     -------
-    centers : (N, 2) 亚像素 (u, v)，按列升序
+    centers : (N, 2) 亚像素 (u, v)
     """
     from ._steger import steger_center
     return steger_center(gray, sigma=sigma, threshold=threshold,
-                         subpixel=subpixel, max_offset=max_offset)
+                         subpixel=subpixel, max_offset=max_offset,
+                         merge=merge, min_sep_px=min_sep_px)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +282,10 @@ def extract_centerline(image: np.ndarray, config) -> np.ndarray:
             _cfg_get(config, "steger_sigma",
                      _cfg_get(config, "smooth_sigma", 1.5))
         )
-        centers = func(gray, threshold=threshold, sigma=steger_sigma)
+        steger_merge = str(_cfg_get(config, "steger_merge", "column"))
+        steger_min_sep = float(_cfg_get(config, "steger_min_sep_px", 1.0))
+        centers = func(gray, threshold=threshold, sigma=steger_sigma,
+                       merge=steger_merge, min_sep_px=steger_min_sep)
     elif method == "peak":
         centers = func(gray, threshold=threshold)
     else:  # gray_centroid

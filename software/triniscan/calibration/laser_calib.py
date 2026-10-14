@@ -40,15 +40,14 @@ import cv2
 import numpy as np
 
 from ..common.geometry import (
-    fit_plane_svd,
     intersect_ray_plane,
-    normalize,
     normalize_plane,
     plane_from_point_normal,
     point_plane_signed_distance,
 )
 from ..common.io_utils import read_image, save_calibration
 from ..common.logging_utils import get_logger
+from ..common.robust import robust_plane_fit
 
 log = get_logger(__name__)
 
@@ -70,10 +69,16 @@ class LaserCalibResult:
     """激光平面标定结果。"""
 
     plane: np.ndarray                        # (4,) [a, b, c, d] 单位法向
-    residual_rms: float                      # 拟合残差 RMS (m)
+    residual_rms: float                      # 稳健拟合残差 RMS (m)
     num_points: int                          # 参与拟合的点数
     num_views: int                           # 有效视角数
     view_point_counts: list[int] = field(default_factory=list)
+    # --- 鲁棒拟合附加信息（向后兼容，旧文件加载时取默认值）---
+    per_view_rms: list[float] = field(default_factory=list)   # 每视角残差(m)
+    rejected_views: list[int] = field(default_factory=list)   # 被剔除视角
+    num_inliers: int = 0                     # 稳健内点数
+    outlier_ratio: float = 0.0               # 离群点比例
+    method: str = "svd"                      # 使用的拟合方法
 
     @property
     def normal(self) -> np.ndarray:
@@ -147,8 +152,13 @@ def calibrate_laser_plane(
     square_size_m: float = 0.020,
     min_points_per_view: int = 20,
     out_path: Optional[str] = None,
+    robust: bool = True,
+    robust_method: str = "irls",
+    view_reject_mm: Optional[float] = 1.0,
+    outlier_mm: Optional[float] = 0.5,
+    min_views: int = 2,
 ) -> LaserCalibResult:
-    """用棋盘格多姿态法标定激光平面。
+    """用棋盘格多姿态法标定激光平面（含稳健估计与输入校验）。
 
     Parameters
     ----------
@@ -168,18 +178,25 @@ def calibrate_laser_plane(
     square_size_m : 方格实际尺寸（米）
     min_points_per_view : 单个视角最少有效点数，不足则该视角剔除
     out_path : 若非空，保存标定结果
+    robust : 是否用稳健拟合（IRLS/RANSAC）替代普通最小二乘
+    robust_method : ``"irls"`` 或 ``"ransac"``（``robust=False`` 时忽略）
+    view_reject_mm : 单视角残差中位数超过此值则剔除该视角（mm；None 关闭）
+    outlier_mm : 稳健拟合的离群距离阈值（mm；None 由尺度自适应）
+    min_views : 可接受的最少有效视角数
 
     Returns
     -------
     LaserCalibResult
     """
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+    _validate_inputs(pattern_cols, pattern_rows, square_size_m,
+                     min_points_per_view, min_views)
     objp = _chessboard_object_points(pattern_cols, pattern_rows, square_size_m)
     pattern_size = (pattern_cols, pattern_rows)
 
-    all_points: list[np.ndarray] = []
+    per_view_points: list[np.ndarray] = []
+    per_view_index: list[int] = []
     view_counts: list[int] = []
-    valid_views = 0
 
     for idx, item in enumerate(pairs):
         gray = _load_gray(item)
@@ -206,49 +223,129 @@ def calibrate_laser_plane(
                         idx, len(pts))
             continue
 
-        all_points.append(pts)
+        per_view_points.append(pts)
+        per_view_index.append(idx)
         view_counts.append(len(pts))
-        valid_views += 1
         log.debug("视角 %d: 贡献 %d 点", idx, len(pts))
 
-    if valid_views < 2:
+    if len(per_view_points) < min_views:
         raise RuntimeError(
-            f"有效视角不足（{valid_views} < 2）。激光平面标定至少需要 "
-            f"2 个不同棋盘格姿态，建议 >= 4。"
+            f"有效视角不足（{len(per_view_points)} < {min_views}）。"
+            f"激光平面标定至少需要 {min_views} 个不同棋盘格姿态，"
+            f"建议 >= 4。"
         )
 
-    points = np.vstack(all_points)
-    if len(points) < 3:
-        raise RuntimeError(f"标定点不足（{len(points)} < 3）")
+    # --- 一阶：全局稳健拟合，得到初版平面 ---
+    initial_points = np.vstack(per_view_points)
+    if len(initial_points) < 3:
+        raise RuntimeError(f"标定点不足（{len(initial_points)} < 3）")
 
-    plane = fit_plane_svd(points)
-    plane = _orient_plane_toward_camera(plane)
+    reject_thr = (view_reject_mm * 1e-3
+                  if view_reject_mm is not None else None)
 
-    residual = float(np.sqrt(np.mean(
-        point_plane_signed_distance(points, plane) ** 2
-    )))
+    # --- 二：按单视角残差剔除劣质视角（用初版平面评估）---
+    plane0 = _fit_plane(initial_points, robust, robust_method, outlier_mm)
+    kept_points: list[np.ndarray] = []
+    kept_index: list[int] = []
+    kept_counts: list[int] = []
+    per_view_rms_all: list[float] = []
+    rejected: list[int] = []
+
+    for pts, idx, cnt in zip(per_view_points, per_view_index, view_counts):
+        rms = float(np.sqrt(np.mean(
+            point_plane_signed_distance(pts, plane0) ** 2)))
+        per_view_rms_all.append(rms)
+        if reject_thr is not None and rms > reject_thr:
+            rejected.append(idx)
+            log.warning("视角 %d: 残差 %.3f mm 超限（> %.3f mm），剔除",
+                        idx, rms * 1e3, view_reject_mm)
+            continue
+        kept_points.append(pts)
+        kept_index.append(idx)
+        kept_counts.append(cnt)
+
+    if len(kept_points) < min_views:
+        log.warning("剔除劣质视角后有效视角不足（%d < %d），"
+                    "回退为使用全部视角", len(kept_points), min_views)
+        kept_points, kept_index, kept_counts = (
+            per_view_points, per_view_index, view_counts)
+        per_view_rms_all = [float(np.sqrt(np.mean(
+            point_plane_signed_distance(p, plane0) ** 2)))
+            for p in kept_points]
+        rejected = []
+
+    # --- 三：最终拟合（稳健）---
+    points = np.vstack(kept_points)
+    fit = robust_plane_fit(
+        points,
+        method=(robust_method if robust else "svd"),
+        outlier_threshold=(outlier_mm * 1e-3
+                           if outlier_mm is not None else None),
+    )
+    plane = _orient_plane_toward_camera(fit.plane)
+
+    # 最终残差：优先报告稳健内点 RMS，同时给出全体 RMS
+    residual = float(fit.residual_rms)
+    residual_all = float(np.sqrt(np.mean(
+        point_plane_signed_distance(points, plane) ** 2)))
 
     result = LaserCalibResult(
         plane=plane,
         residual_rms=residual,
         num_points=len(points),
-        num_views=valid_views,
-        view_point_counts=view_counts,
+        num_views=len(kept_points),
+        view_point_counts=kept_counts,
+        per_view_rms=per_view_rms_all,
+        rejected_views=rejected,
+        num_inliers=int(fit.num_inliers),
+        outlier_ratio=float(fit.outlier_ratio),
+        method=fit.method,
     )
 
     log.info(
         "激光平面标定完成: n=(%.4f, %.4f, %.4f), d=%.4f, "
-        "RMS=%.4f mm, 点数=%d, 视角=%d",
+        "RMS=%.4f mm（全体 %.4f mm）, 内点 %d/%d, 方法=%s, "
+        "视角=%d（剔除 %d）, 点数=%d",
         plane[0], plane[1], plane[2], plane[3],
-        residual * 1e3, len(points), valid_views,
+        residual * 1e3, residual_all * 1e3,
+        result.num_inliers, result.num_points, result.method,
+        result.num_views, len(rejected), len(points),
     )
-    if residual > 5e-4:
+    if residual > 0.5e-3:
         log.warning("激光平面拟合残差偏大 (%.3f mm)，建议检查标定质量",
                     residual * 1e3)
 
     if out_path:
         save_laser_calib(out_path, result)
     return result
+
+
+def _validate_inputs(cols: int, rows: int, square_size_m: float,
+                     min_points_per_view: int, min_views: int) -> None:
+    """对形参与靶标参数做合理性校验（尽早暴露"16 mm 事故"类问题）。"""
+    if cols < 3 or rows < 3:
+        raise ValueError(f"棋盘格内角点数过小: {cols}x{rows}（应 >= 3x3）")
+    if square_size_m <= 0:
+        raise ValueError(f"方格尺寸必须为正: {square_size_m}")
+    if not (1e-4 <= square_size_m <= 0.2):
+        log.warning("方格尺寸 %.4f m 超出常见范围（0.1~200 mm），"
+                    "请确认单位与实测一致", square_size_m)
+    if min_points_per_view < 3:
+        raise ValueError("min_points_per_view 应 >= 3")
+    if min_views < 2:
+        raise ValueError("min_views 应 >= 2")
+
+
+def _fit_plane(points: np.ndarray, robust: bool, robust_method: str,
+               outlier_mm: Optional[float]) -> np.ndarray:
+    """便捷：按开关拟合并返回单位法向平面。"""
+    fit = robust_plane_fit(
+        points,
+        method=(robust_method if robust else "svd"),
+        outlier_threshold=(outlier_mm * 1e-3
+                           if outlier_mm is not None else None),
+    )
+    return _orient_plane_toward_camera(fit.plane)
 
 
 # ---------------------------------------------------------------------------
@@ -355,14 +452,18 @@ def save_laser_calib(path: str, result: LaserCalibResult) -> None:
             "num_views": np.array(result.num_views),
             "view_point_counts": np.array(result.view_point_counts,
                                           dtype=np.int64),
+            "per_view_rms": np.array(result.per_view_rms, dtype=np.float64),
+            "rejected_views": np.array(result.rejected_views, dtype=np.int64),
+            "num_inliers": np.array(result.num_inliers),
+            "outlier_ratio": np.array(result.outlier_ratio),
         },
-        meta={"type": "laser_plane"},
+        meta={"type": "laser_plane", "method": result.method},
     )
 
 
 def load_laser_calib(path: str) -> LaserCalibResult:
     from ..common.io_utils import load_calibration
-    arrays, _ = load_calibration(path)
+    arrays, meta = load_calibration(path)
     return LaserCalibResult(
         plane=arrays["plane"],
         residual_rms=float(arrays.get("residual_rms", np.nan)),
@@ -371,4 +472,12 @@ def load_laser_calib(path: str) -> LaserCalibResult:
         view_point_counts=list(
             np.asarray(arrays.get("view_point_counts", [])).tolist()
         ),
+        per_view_rms=list(
+            np.asarray(arrays.get("per_view_rms", [])).tolist()
+        ),
+        rejected_views=[int(v) for v in
+                        np.asarray(arrays.get("rejected_views", [])).tolist()],
+        num_inliers=int(arrays.get("num_inliers", 0)),
+        outlier_ratio=float(arrays.get("outlier_ratio", 0.0)),
+        method=str(meta.get("method", "svd")),
     )
