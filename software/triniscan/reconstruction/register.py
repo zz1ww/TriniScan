@@ -79,16 +79,43 @@ def to_open3d(points: np.ndarray) -> "o3d.geometry.PointCloud":
 # 内部：ICP
 # ---------------------------------------------------------------------------
 def _ensure_normals(pcd, voxel_size: float, max_nn: int = 30) -> None:
-    """为点云估计法向（总是在下采样之后调用，保证法向与几何一致）。"""
+    """为点云估计法向（总是在下采样之后调用，保证法向与几何一致）。
+
+    点到面 ICP 只依赖法向所在的**直线**，并不要求全局一致朝向，因此
+    朝向统一只是锦上添花。这里做两层容错：
+
+    1. 法向方向用 ``orient_normals_towards_camera_location`` 快速统一
+       （永不失败，代价低）；
+    2. 更严格的 ``orient_normals_consistent_tangent_plane`` 是**可选**的
+       精修，但它内部用 Qhull 做 Delaunay 三角化，遇到共面/共球点云
+       （单视角近平面点云、下采样后高度规则的点云非常常见）会抛
+       ``QH6239 ... cocircular or cospherical`` 之类的精度错误。
+       因此这里用 try/except 包裹，失败则跳过，**绝不让它中断 ICP**。
+    """
     radius = max(voxel_size * 2.0, 1e-6)
     pcd.estimate_normals(
         o3d.geometry.KDTreeSearchParamHybrid(
             radius=radius, max_nn=max_nn)
     )
-    # 点云法向只需自洽即可用于 point-to-plane，但统一朝向更稳
-    pcd.orient_normals_consistent_tangent_plane(
-        k=int(min(max_nn, max(len(pcd.points) - 1, 3)))
-    )
+
+    # (1) 快速、健壮的朝向统一：指向相机原点（永不会失败）。
+    try:
+        pcd.orient_normals_towards_camera_location(
+            np.zeros(3, dtype=np.float64))
+    except Exception:  # pragma: no cover - 极端退化点云
+        pass
+
+    # (2) 可选精修：一致切平面朝向。共面/共球会触发 Qhull 精度错误，
+    #     直接跳过即可（对点到面 ICP 无实质影响）。
+    n = len(pcd.points)
+    if n < 4:
+        return
+    try:
+        pcd.orient_normals_consistent_tangent_plane(
+            k=int(min(max_nn, max(n - 1, 3)))
+        )
+    except Exception as exc:  # Qhull 精度错误等，退化为上一步的朝向
+        log.debug("orient_normals_consistent_tangent_plane 跳过: %s", exc)
 
 
 def _icp(source: "o3d.geometry.PointCloud",
@@ -102,6 +129,9 @@ def _icp(source: "o3d.geometry.PointCloud",
     """
     src = source.voxel_down_sample(voxel_size)
     tgt = target.voxel_down_sample(voxel_size)
+    # 退化保护：下采样后点数过少（<6）无法可靠估法向/配准，直接返回恒等。
+    if len(src.points) < 6 or len(tgt.points) < 6:
+        return _identity_icp_result()
     _ensure_normals(src, voxel_size)
     _ensure_normals(tgt, voxel_size)
 
@@ -115,6 +145,15 @@ def _icp(source: "o3d.geometry.PointCloud",
         .TransformationEstimationPointToPlane(),
     )
     return result
+
+
+def _identity_icp_result():
+    """构造一个"恒等变换 + 零适应度"的 ICP 结果（退化兜底）。"""
+    r = o3d.pipelines.registration.RegistrationResult()
+    r.transformation = np.eye(4)
+    r.fitness = 0.0
+    r.inlier_rmse = 0.0
+    return r
 
 
 # ---------------------------------------------------------------------------
