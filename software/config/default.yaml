@@ -32,6 +32,9 @@ camera_calib:
   pattern_rows: 8
   square_size_m: 0.01
   images_glob: assets/calibration_targets/chessboard/*.png
+  use_sb: true          # 优先用 sector-based 检测器（精度更高，旧版 OpenCV 自动回退）
+  auto_prune: true      # 自动剔除重投影误差过大的坏图
+  min_images_for_pruning: 8   # 视角少于该数时不做自动剔除
 axis_calib:
   sphere_radius_m: 0.02
   method: sphere

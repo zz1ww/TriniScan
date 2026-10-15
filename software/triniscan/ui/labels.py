@@ -76,6 +76,9 @@ FIELD_LABELS: dict[str, str] = {
     "camera_calib.pattern_rows": "棋盘格行数",
     "camera_calib.square_size_m": "方格边长",
     "camera_calib.images_glob": "标定图路径",
+    "camera_calib.use_sb": "SB 检测器",
+    "camera_calib.auto_prune": "自动剔除坏图",
+    "camera_calib.min_images_for_pruning": "剔除最少张数",
 
     # --- 转轴标定 ---
     "axis_calib.sphere_radius_m": "标记球半径",
@@ -186,6 +189,9 @@ FIELD_HINTS: dict[str, str] = {
     "camera_calib.pattern_rows": "棋盘格内角点数（行），如 6",
     "camera_calib.square_size_m": "方格实际边长，单位米",
     "camera_calib.images_glob": "批量标定的图像通配路径",
+    "camera_calib.use_sb": "是否优先使用 sector-based 检测器（精度更高，旧版 OpenCV 自动回退）",
+    "camera_calib.auto_prune": "是否自动剔除重投影误差过大的坏图（模糊/反光/板子翘曲）",
+    "camera_calib.min_images_for_pruning": "视角少于该数时不做自动剔除（保留足够约束）",
 
     "axis_calib.sphere_radius_m": "标记球半径（米）；乒乓球半径 0.020",
     "axis_calib.method": "peak=最亮极点法（关环境光）；"

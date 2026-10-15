@@ -43,6 +43,10 @@ def _cmd_camera(args, cfg) -> int:
         square_size_m=args.square,
         out_path=out,
         show=args.show,
+        use_sb=bool(cfg.get("camera_calib.use_sb", True)),
+        auto_prune=bool(cfg.get("camera_calib.auto_prune", True)),
+        min_images_for_pruning=int(
+            cfg.get("camera_calib.min_images_for_pruning", 8)),
     )
     return 0
 

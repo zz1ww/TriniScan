@@ -157,8 +157,8 @@ def test_calibrate_camera_accepts_flattened_corner_list(monkeypatch):
     calls = {"n": 0}
     orig = CC._detect_corners
 
-    def patched(gray, pattern_size):
-        out = orig(gray, pattern_size)
+    def patched(gray, pattern_size, use_sb=True):
+        out = orig(gray, pattern_size, use_sb=use_sb)
         calls["n"] += 1
         if out is not None and calls["n"] == 2:
             return out.reshape(-1)          # 故意拉平一个视角

@@ -346,6 +346,10 @@ class CaptureSession:
             pattern_rows=self.pattern_rows,
             square_size_m=self.square_size_m,
             out_path=out_path,
+            use_sb=bool(self._cfg_get("camera_calib.use_sb", True)),
+            auto_prune=bool(self._cfg_get("camera_calib.auto_prune", True)),
+            min_images_for_pruning=int(
+                self._cfg_get("camera_calib.min_images_for_pruning", 8)),
         )
         msg = (f"相机标定完成：使用 {result.num_images} 张图像，"
                f"重投影 RMS = {result.rms:.3f} px")
