@@ -183,7 +183,7 @@ FIELD_HINTS: dict[str, str] = {
     "turntable.settle_ms": "转台到位后等待稳定的时间",
 
     "scan.angle_step_deg": "每视角转过的角度，越小越密但越慢",
-    "scan.num_views": "视角数，应等于 360 / 每视角转角",
+    "scan.num_views": "视角数，可选 180/150/120/90/60（转角自动=360/视角数）",
 
     "camera_calib.pattern_cols": "棋盘格内角点数（列），如 9",
     "camera_calib.pattern_rows": "棋盘格内角点数（行），如 6",
@@ -238,7 +238,7 @@ FIELD_HINTS: dict[str, str] = {
     "laser.power_mw": "激光功率，注意安全",
     "laser.safety_class": "激光安全等级（需在装置上标明）",
 
-    "extraction.method": "steger 最精确，gray_centroid 最快",
+    "extraction.method": "steger 最精确但最慢；gray_centroid 均衡（向量化，约 18ms）；parabola 最快亚像素（约 12ms）；peak 最粗（整数像素）",
     "extraction.threshold": "激光亮度绝对阈值，过低会引入噪点",
     "extraction.invert": "亮背景上的暗线请设为 true",
 

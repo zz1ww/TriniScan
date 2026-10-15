@@ -233,8 +233,25 @@ class MainWindow(ttk.Frame):
     # 配置回调（store 为唯一来源）
     # ------------------------------------------------------------------
     def _on_config_change(self, key_path: str, value) -> None:
-        """参数配置面板改了一个值 → 写入 store（内存立即生效）。"""
+        """参数配置面板改了一个值 → 写入 store（内存立即生效）。
+
+        特殊联动：视角数与每视角转角互为约束（转角 = 360 / 视角数），
+        用户改动其一即自动同步另一个，避免二者不一致导致漏拍/重拍。
+        """
         self.store.update(key_path, value)
+
+        try:
+            if key_path == "scan.num_views":
+                n = max(int(float(value)), 1)
+                self.store.update("scan.angle_step_deg",
+                                  round(360.0 / n, 4))
+            elif key_path == "scan.angle_step_deg":
+                step = float(value)
+                if step > 0:
+                    self.store.update("scan.num_views",
+                                      int(round(360.0 / step)))
+        except (TypeError, ValueError):
+            pass  # 非法输入交由字段校验，不联动
 
     def _on_store_change(self, store: ConfigStore,
                          key_path: str, value) -> None:

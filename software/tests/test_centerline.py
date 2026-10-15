@@ -101,3 +101,50 @@ def test_empty_image():
     img = np.zeros((10, 10), dtype=np.uint8)
     pts = extract_gray_centroid_fast(img, threshold=50)
     assert pts.shape == (0, 2)
+
+
+# ---------------------------------------------------------------------------
+# 新增：向量化灰度重心 + 抛物线法
+# ---------------------------------------------------------------------------
+def test_gray_centroid_fast_matches_reference():
+    """向量化实现应与逐列参考实现逐点一致。"""
+    from triniscan.extraction.centerline import extract_gray_centroid
+    img, _ = _synth_stripe(center_v=40.7, sigma=2.5)
+    ref = extract_gray_centroid(img, threshold=50)
+    vec = extract_gray_centroid_fast(img, threshold=50)
+    assert ref.shape == vec.shape
+    assert np.allclose(ref, vec, atol=1e-9)
+
+
+def test_parabola_accuracy():
+    """抛物线法应达到亚像素精度（误差 < 0.1 px）。"""
+    from triniscan.extraction.centerline import extract_parabola
+    img, true_v = _synth_stripe(center_v=50.3, sigma=2.0)
+    pts = extract_parabola(img, threshold=50)
+    assert len(pts) == img.shape[1]
+    assert abs(pts[:, 1].mean() - true_v) < 0.1
+
+
+def test_parabola_various_centers():
+    from triniscan.extraction.centerline import extract_parabola
+    for c in (30.0, 30.25, 30.5, 30.75, 31.0):
+        img, true_v = _synth_stripe(center_v=c, sigma=2.0)
+        pts = extract_parabola(img, threshold=50)
+        assert abs(pts[:, 1].mean() - true_v) < 0.1
+
+
+def test_parabola_registered_and_dispatched():
+    from triniscan.extraction.centerline import extract_parabola
+    assert "parabola" in available_methods()
+    img, _ = _synth_stripe()
+    pts = extract_centerline(
+        img, {"method": "parabola", "threshold": 50, "smooth_sigma": 1.0})
+    assert pts.ndim == 2 and pts.shape[1] == 2
+    # 直接调用签名兼容
+    assert extract_parabola(img, threshold=50).shape[1] == 2
+
+
+def test_parabola_empty_image():
+    from triniscan.extraction.centerline import extract_parabola
+    pts = extract_parabola(np.zeros((10, 10), dtype=np.uint8), threshold=50)
+    assert pts.shape == (0, 2)

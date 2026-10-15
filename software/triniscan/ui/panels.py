@@ -12,6 +12,16 @@ from typing import Any, Callable, Optional
 
 from .labels import field_hint, field_label, group_label
 
+#: 已知应以下拉框（而非自由文本）呈现的配置项，及其候选值。
+#: 用于把"提取方法""视角数"这类**取值受限**的参数做成选择框，
+#: 避免用户输入非法值。
+_FIELD_CHOICES: dict[str, list] = {
+    "extraction.method": [
+        "steger", "gray_centroid", "parabola", "peak",
+    ],
+    "scan.num_views": [180, 150, 120, 90, 60],
+}
+
 
 # ---------------------------------------------------------------------------
 def _bind_tooltip(widget: tk.Misc, text: str,
@@ -130,7 +140,15 @@ class ConfigPanel(ttk.LabelFrame):
         tip = hint + ("\n" if hint else "") + f"配置项：{key_path}"
         _bind_tooltip(label, tip)
 
-        if isinstance(value, bool):
+        if key_path in _FIELD_CHOICES:
+            choices = _FIELD_CHOICES[key_path]
+            var = tk.StringVar(value=str(value))
+            widget = ttk.Combobox(
+                parent, textvariable=var,
+                values=[str(c) for c in choices], width=14,
+                state="readonly")
+            self._types[key_path] = type(choices[0])
+        elif isinstance(value, bool):
             var = tk.StringVar(value="是" if value else "否")
             widget = ttk.Combobox(parent, textvariable=var,
                                   values=("是", "否"), width=14,

@@ -20,7 +20,7 @@ turntable:
   timeout_s: 5.0
 scan:
   angle_step_deg: 2.0
-  num_views: 180
+  num_views: 180        # 视角数，可选 180/150/120/90/60（转角自动=360/n）
   timeout_s: 60
 calibration:
   camera_file: software/config/calib_camera.npz
@@ -65,7 +65,7 @@ quality:
   axis_rms_good: 0.10
   axis_rms_warn: 0.30
 extraction:
-  method: steger
+  method: steger        # steger(最准/慢) | gray_centroid(均衡) | parabola(最快) | peak(最粗)
   threshold: 60.0
   smooth_sigma: 1.5
   steger_sigma: 1.5
