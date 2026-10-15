@@ -117,6 +117,7 @@ FIELD_LABELS: dict[str, str] = {
     "extraction.method": "提取方法",
     "extraction.threshold": "亮度阈值",
     "extraction.smooth_sigma": "预处理平滑",
+    "extraction.subpixel": "亚像素插值",
     "extraction.steger_sigma": "Steger 尺度",
     "extraction.steger_merge": "条纹归并策略",
     "extraction.steger_min_sep_px": "中心最小间距",
@@ -128,6 +129,9 @@ FIELD_LABELS: dict[str, str] = {
     # --- 三维重建 ---
     "reconstruction.voxel_size": "体素尺寸",
     "reconstruction.icp_refine": "ICP 精配准",
+    "reconstruction.depth_filter": "深度过滤",
+    "reconstruction.depth_max_m": "深度上限(m)",
+    "reconstruction.bounds_radius_m": "半径上限(m)",
     "reconstruction.global_align": "全局对齐",
     "reconstruction.pose_graph": "位姿图优化",
     "reconstruction.edge_span": "位姿图邻接数",
@@ -238,7 +242,7 @@ FIELD_HINTS: dict[str, str] = {
     "laser.power_mw": "激光功率，注意安全",
     "laser.safety_class": "激光安全等级（需在装置上标明）",
 
-    "extraction.method": "steger 最精确但最慢；gray_centroid 均衡（向量化，约 18ms）；parabola 最快亚像素（约 12ms）；peak 最粗（整数像素）",
+    "extraction.method": "row_peak 逐行峰值+抛物线(默认,竖直线激光最优,抗零散亮点)；row_centroid 逐行重心；steger 最精确但最慢(不依赖扫描方向)；gray_centroid 逐列均衡；parabola 逐列最快亚像素；peak 逐列最粗",
     "extraction.threshold": "激光亮度绝对阈值，过低会引入噪点",
     "extraction.invert": "亮背景上的暗线请设为 true",
 

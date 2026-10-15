@@ -16,6 +16,11 @@ from .turntable_removal import (
     TurntableRemovalResult,
     remove_turntable_surface,
 )
+from .point_filter import (
+    FilterResult,
+    filter_by_depth,
+    filter_by_bounds,
+)
 
 __all__ = [
     "triangulate", "pixel_to_rays", "undistort_points",
@@ -23,4 +28,5 @@ __all__ = [
     "MeshResult", "reconstruct_mesh", "reconstruct_mesh_ball_pivoting",
     "prepare_normals",
     "TurntableRemovalResult", "remove_turntable_surface",
+    "FilterResult", "filter_by_depth", "filter_by_bounds",
 ]

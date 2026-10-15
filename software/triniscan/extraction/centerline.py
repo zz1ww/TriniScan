@@ -3,18 +3,33 @@
 本模块实现线结构光（光切法）中**激光条纹中心**的亚像素定位，
 是三角测量精度的第一道关口。条纹中心定位偏差会 1:1 传递到三维点。
 
-三种方法
---------
-1. **灰度重心法 (gray centroid)** — 逐列/逐行按灰度加权求重心。
-   实现简单、速度快，适合条纹宽度中等、亮度分布近似对称的情形。
-   相比极值法可显著抑制亮度不均与噪声。
+列扫描 vs 行扫描
+----------------
+"逐列"与"逐行"是**同一套权重逻辑**的两个扫描方向，选哪个取决于
+激光条纹在图像中的走向：
 
+- **逐列 (column)**：每列沿 v 方向求一个中心，适合**水平条纹**；
+- **逐行 (row)**：每行沿 u 方向求一个中心，适合**竖直条纹**。
+
+本系统的激光线在图像中近似**竖直**（跨越多行），因此**逐行扫描**
+是更自然的选择：图像高 1080 行 → 每帧最多 1080 个采样，且分辨率
+不被条纹宽度限制。逐列扫描在同样的数据上每个有效列只能给出一个点，
+采样密度低得多。这也是成熟开源转台扫描器的通行做法。
+
+方法清单
+--------
+1. **灰度重心法 (gray centroid)** — 按灰度加权求重心，列/行两个方向
+   均有实现。实现简单、速度快，适合条纹宽度中等、亮度分布近似对称
+   的情形。
 2. **Steger 法 (Hessian)** — 基于 Hessian 矩阵求条纹法向，再沿法向
    做泰勒展开求亚像素极值点。精度最高、抗噪最好，适合高精度场合，
-   计算量较大。
+   计算量较大。对条纹走向不敏感（不依赖扫描方向）。
+3. **抛物线插值法 (parabola)** — 峰值 + 三点抛物线插值，最快的亚像素
+   方法。
+4. **极值法 (peak)** — 取最大灰度位置。最快，精度最低，仅用于预览。
 
-3. **极值法 (peak)** — 取每列最大灰度位置。最快，精度最低，
-   仅用于快速预览或作为其他方法的初值。
+默认方法为 ``row_peak``（逐行峰值 + 抛物线亚像素），可用 ``steger``
+在精度敏感时对比替换。
 
 设计说明
 --------
@@ -41,6 +56,8 @@ __all__ = [
     "extract_parabola",
     "extract_steger",
     "extract_peak",
+    "extract_row_peak",
+    "extract_row_centroid",
     "preprocess",
     "available_methods",
 ]
@@ -238,6 +255,122 @@ def extract_parabola(gray: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# 方法 1d：逐行扫描（适配竖直线激光，本系统默认）
+# ---------------------------------------------------------------------------
+def extract_row_peak(gray: np.ndarray,
+                     threshold: float = 60.0,
+                     min_pixels: int = 1,
+                     subpixel: bool = True) -> np.ndarray:
+    """逐行"峰值 + 三点抛物线插值"亚像素提取（**竖直线激光首选**）。
+
+    与 :func:`extract_parabola` 完全相同的权重逻辑，只是把扫描方向从
+    "逐列（沿 v）"换成"逐行（沿 u）"——因为本系统的激光条纹近似竖直，
+    每一行都有且仅有一个明确的激光位置。
+
+    对每一行 v：
+
+    1. 沿 u 取灰度最大值所在列 ``p``（``argmax``，**对零散亮点免疫**：
+       只有全场最亮的像素才会被选中，不会像重心法那样被周边暗噪声拉偏）；
+    2. 若峰值 > ``threshold`` 且 ``p`` 不在边界，用左右邻居
+       ``y[p-1], y[p], y[p+1]`` 拟合抛物线取顶点，得到亚像素偏移::
+
+           delta = 0.5 * (y[p-1] - y[p+1]) / (y[p-1] - 2·y[p] + y[p+1])
+
+    全程向量化（``argmax(axis=1)`` + 花式索引），无 Python 循环。
+
+    Parameters
+    ----------
+    gray : 预处理后的灰度图
+    threshold : 分割阈值（绝对灰度）
+    min_pixels : 该行超过阈值的像素数下限（用于过滤仅一两个噪声点的行）
+    subpixel : 是否做抛物线亚像素插值；False 时返回整数峰值列
+
+    Returns
+    -------
+    centers : (N, 2) 亚像素 (u, v)，按行（v）升序
+    """
+    g = np.asarray(gray, dtype=np.float64)
+    height, width = g.shape
+    if height < 1 or width < 3:
+        return np.empty((0, 2), dtype=np.float64)
+
+    peak = np.argmax(g, axis=1)                        # (H,) 每行最亮列
+    rows = np.arange(height)
+    y0 = g[rows, peak]                                 # 每行峰值
+
+    valid = y0 > float(threshold)
+    if min_pixels > 1:
+        valid &= (g > threshold).sum(axis=1) >= min_pixels
+    if subpixel:
+        # 峰在边界时无法取左右邻居 → 该行放弃亚像素（退化为整数）
+        valid &= (peak > 0) & (peak < width - 1)
+
+    # 连续性校验：真激光是一条**连续亮带**，其峰值两侧相邻列也应足够亮；
+    # 而环境光/反光的"飞点"通常是**孤立**的个别像素。要求峰值邻域
+    # （在边界内）亮度超过阈值的一半，可有效剔除孤立亮点。
+    interior = (peak > 0) & (peak < width - 1)
+    if interior.any():
+        idx = np.nonzero(interior)[0]
+        nb = np.minimum(g[idx, peak[idx] - 1], g[idx, peak[idx] + 1])
+        ok = nb > float(threshold) * 0.5
+        bad = idx[~ok]
+        valid[bad] = False
+
+    if not valid.any():
+        return np.empty((0, 2), dtype=np.float64)
+
+    u = peak[valid].astype(np.float64)
+    if subpixel:
+        ym1 = g[rows[valid], peak[valid] - 1]
+        yp1 = g[rows[valid], peak[valid] + 1]
+        yy = y0[valid]
+        denom = ym1 - 2.0 * yy + yp1
+        delta = np.zeros(u.shape, dtype=np.float64)
+        nz = np.abs(denom) > 1e-12
+        delta[nz] = 0.5 * (ym1[nz] - yp1[nz]) / denom[nz]
+        delta = np.clip(delta, -1.0, 1.0)              # 顶点须落在中心格
+        u = u + delta
+
+    v = rows[valid].astype(np.float64)
+    return np.column_stack([u, v])
+
+
+def extract_row_centroid(gray: np.ndarray,
+                         threshold: float = 60.0,
+                         min_pixels: int = 1) -> np.ndarray:
+    """逐行灰度重心法（竖直线激光的亚像素参考实现）。
+
+    与 :func:`extract_gray_centroid_fast` 逻辑一致，只是改为按**行**
+    做加权重心（全向量化）。相比 :func:`extract_row_peak`，重心法对
+    亮度分布更敏感、精度略高，但**对行内零散亮点更脆弱**（会被拉偏）。
+    适合条纹干净、背景抑制良好的情形。
+
+    Returns
+    -------
+    centers : (N, 2) 亚像素 (u, v)，按行（v）升序
+    """
+    g = np.asarray(gray, dtype=np.float64)
+    height, width = g.shape
+
+    weights = np.maximum(g - float(threshold), 0.0)    # (H, W)
+    if min_pixels > 1:
+        counts = (g > threshold).sum(axis=1)
+        weights[counts < min_pixels, :] = 0.0
+
+    row_sum = weights.sum(axis=1)                      # (H,)
+    valid = row_sum > 0.0
+    if not valid.any():
+        return np.empty((0, 2), dtype=np.float64)
+
+    cols = np.arange(width, dtype=np.float64)[None, :]
+    col_sum = (weights * cols).sum(axis=1)             # (H,)
+
+    u = col_sum[valid] / row_sum[valid]
+    v = np.nonzero(valid)[0].astype(np.float64)
+    return np.column_stack([u, v])
+
+
+# ---------------------------------------------------------------------------
 # 方法 2：Steger 法（Hessian）
 # ---------------------------------------------------------------------------
 def extract_steger(gray: np.ndarray,
@@ -296,7 +429,12 @@ _METHODS: dict[str, Callable[..., np.ndarray]] = {
     "parabola": extract_parabola,
     "steger": extract_steger,
     "peak": extract_peak,
+    "row_peak": extract_row_peak,
+    "row_centroid": extract_row_centroid,
 }
+
+#: 需要 ``subpixel`` 参数的方法（逐行峰值）
+_ROW_PEAK_METHODS = {"row_peak"}
 
 
 def available_methods() -> list[str]:
@@ -355,7 +493,11 @@ def extract_centerline(image: np.ndarray, config) -> np.ndarray:
                        merge=steger_merge, min_sep_px=steger_min_sep)
     elif method == "peak":
         centers = func(gray, threshold=threshold)
-    else:  # gray_centroid / parabola（向量化，支持 min_pixels）
+    elif method in _ROW_PEAK_METHODS:
+        subpixel = bool(_cfg_get(config, "subpixel", True))
+        centers = func(gray, threshold=threshold, min_pixels=min_pixels,
+                       subpixel=subpixel)
+    else:  # gray_centroid / parabola / row_centroid（向量化，支持 min_pixels）
         centers = func(gray, threshold=threshold, min_pixels=min_pixels)
 
     log.debug("中心线提取[%s]: %d 点", method, len(centers))

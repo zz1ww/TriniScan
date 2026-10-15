@@ -32,9 +32,12 @@ from ..reconstruction import (
     reconstruct_mesh,
     remove_turntable_surface,
     triangulate,
+    filter_by_depth,
+    filter_by_bounds,
 )
 from ..volume import close_mesh, compute_volume
 from ..calibration import (
+    AxisCalibResult,
     load_axis_calib,
     load_camera_calib,
     load_laser_calib,
@@ -91,26 +94,69 @@ class ScanPipeline:
 
         质量阈值由 :mod:`triniscan.calibration.quality` 统一定义，
         可通过配置覆盖；``calibration.strict=true`` 时不合格将中止。
+
+        转轴有两种来源（``calibration.axis_mode``）：
+
+        - ``"z_axis"``（默认）：**不标定**，直接假设转轴为相机系下的
+          Z 轴（方向 ``z_axis_dir``、过点 ``z_axis_point``）。这是成熟
+          开源转台扫描器的通行做法——转台轴本就是物理竖直轴，只要物体
+          在转台中心、相机大致水平，用 Z 轴即可，省去易出错的球心标定。
+        - ``"calibrated"``：从 ``calibration.axis_file`` 载入实测轴。
         """
         self._cam_calib = load_camera_calib(
             self.cfg.resolve("calibration.camera_file"))
         self._laser_calib = load_laser_calib(
             self.cfg.resolve("calibration.laser_file"))
-        self._axis_calib = load_axis_calib(
-            self.cfg.resolve("calibration.axis_file"))
+
+        axis_mode = str(self.cfg.get("calibration.axis_mode", "z_axis"))
+        if axis_mode == "z_axis":
+            self._axis_calib = self._synthetic_z_axis()
+            axis_for_quality = None      # 合成轴无需质量校验
+        else:
+            self._axis_calib = load_axis_calib(
+                self.cfg.resolve("calibration.axis_file"))
+            axis_for_quality = self._axis_calib
 
         thresholds = self._quality_thresholds()
         strict = bool(self.cfg.get("calibration.strict", False))
         self._calib_reports = validate_calibrations(
             camera=self._cam_calib, laser=self._laser_calib,
-            axis=self._axis_calib, thresholds=thresholds, strict=strict,
+            axis=axis_for_quality, thresholds=thresholds, strict=strict,
         )
         log.info("\n%s", format_reports(self._calib_reports))
+        if axis_mode == "z_axis":
+            log.info(
+                "转轴: z_axis 模式（不标定）— dir=%s, point=%s",
+                np.round(self._axis_calib.direction, 4).tolist(),
+                np.round(self._axis_calib.point, 4).tolist(),
+            )
+        else:
+            log.info(
+                "转轴: calibrated 模式 — RMS=%.3f mm",
+                self._axis_calib.residual_rms * 1e3,
+            )
         log.info(
-            "标定已载入: 相机 RMS=%.3f px, 激光平面 RMS=%.3f mm, "
-            "转轴 RMS=%.3f mm",
+            "标定已载入: 相机 RMS=%.3f px, 激光平面 RMS=%.3f mm",
             self._cam_calib.rms, self._laser_calib.residual_rms * 1e3,
-            self._axis_calib.residual_rms * 1e3,
+        )
+
+    def _synthetic_z_axis(self) -> AxisCalibResult:
+        """构造"相机系 Z 轴"的合成本征轴（不标定模式）。"""
+        point = np.asarray(
+            self.cfg.get("calibration.z_axis_point", [0.0, 0.0, 0.0]),
+            dtype=np.float64).reshape(3)
+        direction = np.asarray(
+            self.cfg.get("calibration.z_axis_dir", [0.0, 0.0, 1.0]),
+            dtype=np.float64).reshape(3)
+        nrm = np.linalg.norm(direction)
+        if nrm < 1e-12:
+            raise ValueError("calibration.z_axis_dir 不能为零向量")
+        direction = direction / nrm
+        return AxisCalibResult(
+            point=point, direction=direction,
+            radius=0.0, residual_rms=0.0,
+            num_points=0, num_inliers=0, outlier_ratio=0.0,
+            method="z_axis",
         )
 
     def _quality_thresholds(self) -> dict:
@@ -167,7 +213,12 @@ class ScanPipeline:
     # 阶段 2：提取 + 三角测量
     # ------------------------------------------------------------------
     def reconstruct_views(self, views: list[dict]) -> list[ViewCloud]:
-        """对每个视角提取中心线并三角测量为三维点。"""
+        """对每个视角提取中心线并三角测量为三维点。
+
+        三角测量后立即施加**相机系深度门限**（``reconstruction.depth_filter``），
+        在最早的环节剔除环境光/反光造成的远点——这是"飞碟"点云的主因，
+        越早剔除，后续拼接/网格越干净。
+        """
         if self._cam_calib is None:
             self.load_calibrations()
 
@@ -177,16 +228,30 @@ class ScanPipeline:
         ex_cfg = self.cfg.raw.get("extraction", {})
         min_pts = int(self.cfg.get("extraction.min_points", 50))
 
+        # 深度门限配置（相机系，单位 m）
+        use_depth = bool(self.cfg.get("reconstruction.depth_filter", False))
+        depth_min = float(self.cfg.get("reconstruction.depth_min_m", 0.0))
+        depth_max = float(self.cfg.get("reconstruction.depth_max_m", 0.0))
+
         clouds = []
+        n_removed = 0
         for v in views:
             pixels = extract_centerline(v["raw"], ex_cfg)
             points, mask = triangulate(pixels, K, plane, dist,
                                        return_mask=True)
+            if use_depth and len(points):
+                fr = filter_by_depth(points, depth_min=depth_min,
+                                     depth_max=depth_max)
+                points = fr.points
+                n_removed += fr.num_removed
             if len(points) < min_pts:
                 log.warning("视角 %s: 有效点不足 (%d)，跳过",
                             v["index"], len(points))
                 continue
             clouds.append(ViewCloud(angle_deg=v["angle_deg"], points=points))
+        if use_depth and n_removed:
+            log.info("深度过滤合计剔除 %d 点（%d 视角）",
+                     n_removed, len(views))
         log.info("三角测量完成: %d/%d 视角有效", len(clouds), len(views))
         return clouds
 
@@ -214,6 +279,9 @@ class ScanPipeline:
         )
         pcd = reg.pointcloud
 
+        # --- 世界系物理边界过滤（半径 / 轴向）---
+        pcd, bounds_info = self._filter_bounds(pcd)
+
         # --- 去转盘表面 ---
         removal_info = {"applied": False, "removed": 0}
         if bool(self.cfg.get("reconstruction.remove_turntable", True)):
@@ -230,7 +298,40 @@ class ScanPipeline:
 
         self._last_register_method = reg.method
         self._last_turntable = removal_info
+        self._last_bounds = bounds_info
         return pcd, pc_path
+
+    def _filter_bounds(self, pcd):
+        """按世界系物理边界（半径 + 轴向）剔除越界点，返回 ``(pcd, info)``。
+
+        与"去转盘"不同，这里剔除的是**转台半径之外 / 高度范围之外**的
+        虚假点（反光、环境光）。半径门限需显式配置
+        ``reconstruction.bounds_radius_m`` 才生效，避免误伤大物体。
+        """
+        import open3d as o3d
+
+        r_max = float(self.cfg.get("reconstruction.bounds_radius_m", 0.0) or 0.0)
+        z_min = self.cfg.get("reconstruction.bounds_z_min_m", None)
+        z_max = self.cfg.get("reconstruction.bounds_z_max_m", None)
+        info = {"applied": False, "removed": 0}
+        if r_max <= 0 and z_min is None and z_max is None:
+            return pcd, info
+
+        pts = np.asarray(pcd.points, dtype=np.float64)
+        res = filter_by_bounds(
+            pts, axis_point=self._axis_calib.point,
+            axis_dir=self._axis_calib.direction,
+            radius_max=r_max,
+            z_min=(float(z_min) if z_min is not None else None),
+            z_max=(float(z_max) if z_max is not None else None),
+        )
+        info = {"applied": res.applied, "removed": res.num_removed,
+                "reason": res.reason}
+        if not res.applied or res.num_removed == 0:
+            return pcd, info
+        new_pcd = o3d.geometry.PointCloud()
+        new_pcd.points = o3d.utility.Vector3dVector(res.points)
+        return new_pcd, info
 
     def _remove_turntable(self, pcd):
         """对世界系点云做转盘去除（几何拟合），返回 ``(pcd, info)``。"""

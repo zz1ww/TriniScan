@@ -17,6 +17,7 @@ from .labels import field_hint, field_label, group_label
 #: 避免用户输入非法值。
 _FIELD_CHOICES: dict[str, list] = {
     "extraction.method": [
+        "row_peak", "row_centroid",
         "steger", "gray_centroid", "parabola", "peak",
     ],
     "scan.num_views": [180, 150, 120, 90, 60],

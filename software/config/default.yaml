@@ -26,6 +26,12 @@ calibration:
   camera_file: software/config/calib_camera.npz
   laser_file: software/config/calib_laser.npz
   axis_file: software/config/calib_axis.npz
+  # 转轴来源：z_axis(默认,不标定,假设相机系Z轴) | calibrated(用 axis_file)
+  # 成熟开源转台扫描器通行做法：转台轴=物理竖直轴，不标定即可；
+  # 若需严格物理竖直，改用 calibrated 并保证轴标定可靠。
+  axis_mode: z_axis
+  z_axis_point: [0.0, 0.0, 0.0]   # z_axis 模式下轴上一点（相机系）
+  z_axis_dir: [0.0, 0.0, 1.0]     # z_axis 模式下的轴方向（相机系）
   strict: false
 camera_calib:
   pattern_cols: 11
@@ -65,9 +71,12 @@ quality:
   axis_rms_good: 0.10
   axis_rms_warn: 0.30
 extraction:
-  method: steger        # steger(最准/慢) | gray_centroid(均衡) | parabola(最快) | peak(最粗)
+  method: row_peak     # 默认逐行（竖直线激光最优；对零散亮点免疫）
+  # row_peak(逐行峰值+抛物线,默认) | row_centroid(逐行重心)
+  # steger(最准/慢) | gray_centroid(逐列均衡) | parabola(逐列最快) | peak(逐列最粗)
   threshold: 60.0
   smooth_sigma: 1.5
+  subpixel: true       # row_peak 是否做抛物线亚像素插值
   steger_sigma: 1.5
   steger_merge: normal
   steger_min_sep_px: 1.0
@@ -77,11 +86,18 @@ extraction:
   roi: null
 reconstruction:
   voxel_size: 0.0005
-  icp_refine: true
+  icp_refine: false     # 角度已知的转台：不做 ICP/位姿图，纯几何旋转拼接
   global_align: true
   pose_graph: true
   edge_span: 3
   iterative_iters: 3
+  # --- 物理边界过滤（剔除环境光/反光远点，"飞碟"主因）---
+  depth_filter: true    # 三角测量后按相机系深度剔除远点
+  depth_min_m: 0.0      # 深度下限(m)，0=不限
+  depth_max_m: 0.30     # 深度上限(m)；本物体约0.17~0.28m，远点0.29~0.37m
+  bounds_radius_m: 0.0  # 世界系距轴半径上限(m)，0=不限（建议设为转台半径）
+  bounds_z_min_m: null  # 世界系沿轴坐标下限(m)，null=不限
+  bounds_z_max_m: null  # 世界系沿轴坐标上限(m)，null=不限
   poisson_depth: 9
   adaptive_depth: true
   orient_max_nn: 30
