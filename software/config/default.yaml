@@ -43,10 +43,15 @@ camera_calib:
   min_images_for_pruning: 8   # 视角少于该数时不做自动剔除
 axis_calib:
   sphere_radius_m: 0.02
-  method: sphere
+  # peak: 暗环境下激光打在标记球上的**最亮斑点**做亚像素质心（推荐，稳健）
+  # sphere: 亮背景下检测黑球轮廓反求球心（依赖 Hough，环境光下易失败）
+  method: peak
+  save_images: true       # 强制保存每个角度的原始图，便于复查/复标
   num_views: 12
   step_deg: 30.0
-  min_views: 3
+  min_views: 6            # 少于该角度数视为标定失败
+  max_residual_mm: 1.0    # 圆拟合残差 RMS 上限(mm)，超过判为失败
+  min_radius_mm: 2.0      # 拟合圆半径下限(mm)，过小说明点挤在一起(坏标定)
   settle_ms: 250
   spot_threshold: 60.0
   spot_win_px: 25

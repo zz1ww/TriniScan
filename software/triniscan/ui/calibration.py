@@ -433,10 +433,16 @@ class CalibrationPanel(ttk.Frame):
 
         def _run() -> None:
             from .capture_session import sweep_axis_calibration
+            try:
+                save_images = bool(self.cfg.get(
+                    "axis_calib.save_images", True))
+            except AttributeError:
+                save_images = True
             result = sweep_axis_calibration(
                 self.cfg,
                 on_progress=_progress,
                 stop_flag=lambda: self._axis_stop,
+                save_images=save_images,
             )
             self._queue.put(("axis_done", result))
 

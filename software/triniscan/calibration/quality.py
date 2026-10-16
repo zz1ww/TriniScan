@@ -193,21 +193,57 @@ def assess_laser(result, thresholds: Optional[dict] = None) -> QualityReport:
                          rms_m * 1e3, "mm", msg, details)
 
 
-def assess_axis(result, thresholds: Optional[dict] = None) -> QualityReport:
-    """评估转轴标定（依据圆拟合残差 RMS 与点数）。"""
+def assess_axis(result, thresholds: Optional[dict] = None,
+                ref_direction: Optional[np.ndarray] = None,
+                ref_tol_deg: float = 25.0) -> QualityReport:
+    """评估转轴标定（依据圆拟合残差 RMS 与点数）。
+
+    Parameters
+    ----------
+    result : AxisCalibResult
+    thresholds : 阈值覆盖
+    ref_direction : (3,) 可选参考方向（如激光线走向/重力），用于校验
+        拟合轴的方向是否合理。二者夹角超过 ``ref_tol_deg`` 判为 FAIL
+        ——这能抓住"拟合圆退化、方向乱指"的坏标定。
+    ref_tol_deg : 方向一致性容差（度）
+    """
     th = _thresholds(thresholds)["axis"]
     rms_m = float(getattr(result, "residual_rms", float("nan")))
     level = _level(rms_m, th)
 
     num_points = int(getattr(result, "num_points", 0))
+    radius_m = float(getattr(result, "radius", 0.0))
     details: dict[str, Any] = {
         "num_points": num_points,
-        "radius_m": float(getattr(result, "radius", 0.0)),
+        "radius_m": radius_m,
         "good_mm": th["good"] * 1e3, "warn_mm": th["warn"] * 1e3,
     }
     if num_points and num_points < 6:
         level = max(level, QualityLevel.WARN, key=lambda l: l.rank)
         details["reason_point_count"] = f"特征点仅 {num_points}（建议 >= 8）"
+
+    # 半径过小 = 特征点几乎挤在一起 = 取点失败（本系统曾因此写出坏轴）
+    if abs(radius_m) * 1e3 < 2.0:
+        level = QualityLevel.FAIL
+        details["reason_radius"] = (
+            f"拟合圆半径仅 {radius_m * 1e3:.2f}mm，特征点几乎重合")
+
+    # 方向一致性：拟合轴应与参考方向（激光线走向）大致平行
+    if ref_direction is not None:
+        d = np.asarray(getattr(result, "direction", [0, 0, 1]),
+                       dtype=np.float64).reshape(3)
+        r = np.asarray(ref_direction, dtype=np.float64).reshape(3)
+        nd, nr = np.linalg.norm(d), np.linalg.norm(r)
+        if nd > 1e-12 and nr > 1e-12:
+            cos = abs(float(d @ r) / (nd * nr))
+            cos = max(-1.0, min(1.0, cos))
+            angle_deg = float(np.degrees(np.arccos(cos)))
+            details["axis_ref_angle_deg"] = angle_deg
+            if angle_deg > ref_tol_deg:
+                level = QualityLevel.FAIL
+                details["reason_direction"] = (
+                    f"拟合轴与参考方向夹角 {angle_deg:.1f}° "
+                    f"> {ref_tol_deg:.0f}°，方向不合理")
 
     msg = {
         QualityLevel.OK: "转轴良好",

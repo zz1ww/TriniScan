@@ -69,6 +69,9 @@ FIELD_LABELS: dict[str, str] = {
     "calibration.camera_file": "相机标定文件",
     "calibration.laser_file": "激光平面标定文件",
     "calibration.axis_file": "转轴标定文件",
+    "calibration.axis_mode": "转轴来源",
+    "calibration.z_axis_point": "Z轴过点",
+    "calibration.z_axis_dir": "Z轴方向",
     "calibration.strict": "严格校验标定",
 
     # --- 相机标定 ---
@@ -83,9 +86,12 @@ FIELD_LABELS: dict[str, str] = {
     # --- 转轴标定 ---
     "axis_calib.sphere_radius_m": "标记球半径",
     "axis_calib.method": "取点方法",
+    "axis_calib.save_images": "保存标定图",
     "axis_calib.num_views": "采样角度数",
     "axis_calib.step_deg": "每步转角",
     "axis_calib.min_views": "最少有效视角",
+    "axis_calib.max_residual_mm": "残差上限(mm)",
+    "axis_calib.min_radius_mm": "半径下限(mm)",
     "axis_calib.settle_ms": "到位稳定延时",
     "axis_calib.spot_threshold": "亮点灰度阈值",
     "axis_calib.spot_win_px": "亮点搜索窗口",
@@ -130,8 +136,11 @@ FIELD_LABELS: dict[str, str] = {
     "reconstruction.voxel_size": "体素尺寸",
     "reconstruction.icp_refine": "ICP 精配准",
     "reconstruction.depth_filter": "深度过滤",
+    "reconstruction.depth_min_m": "深度下限(m)",
     "reconstruction.depth_max_m": "深度上限(m)",
     "reconstruction.bounds_radius_m": "半径上限(m)",
+    "reconstruction.bounds_z_min_m": "轴向下限(m)",
+    "reconstruction.bounds_z_max_m": "轴向上限(m)",
     "reconstruction.global_align": "全局对齐",
     "reconstruction.pose_graph": "位姿图优化",
     "reconstruction.edge_span": "位姿图邻接数",
@@ -198,10 +207,13 @@ FIELD_HINTS: dict[str, str] = {
     "camera_calib.min_images_for_pruning": "视角少于该数时不做自动剔除（保留足够约束）",
 
     "axis_calib.sphere_radius_m": "标记球半径（米）；乒乓球半径 0.020",
-    "axis_calib.method": "peak=最亮极点法（关环境光）；"
-                         "sphere=球心法（亮背景）",
+    "axis_calib.method": "peak=最亮极点法（暗环境，推荐，不用 Hough）；"
+                         "sphere=球心法（亮背景，依赖 Hough 易失败）",
+    "axis_calib.save_images": "保存每个角度的原图，便于复查失败原因",
     "axis_calib.num_views": "转台采样角度数，建议 12",
     "axis_calib.min_views": "少于该数量则判定标定失败",
+    "axis_calib.max_residual_mm": "圆拟合残差 RMS 上限，超过判失败",
+    "axis_calib.min_radius_mm": "拟合圆半径下限；过小说明取点失败（点挤在一起）",
     "axis_calib.spot_threshold": "亮点相对背景的灰度下限",
     "axis_calib.spot_win_px": "亮点亚像素定位的搜索窗口半径",
     "axis_calib.robust": "RANSAC 抗跳点，建议开启",

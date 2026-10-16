@@ -590,6 +590,16 @@ def sweep_axis_calibration(
             num_views=collector.count, num_failed=len(collector.errors),
             elapsed_s=time.time() - t0)
 
+    min_views = int(_get("axis_calib.min_views", 6))
+    if collector.count < min_views:
+        return AxisSweepResult(
+            ok=False,
+            message=(f"有效视角不足（{collector.count} < {min_views}）。"
+                     f"转轴标定不可靠，请重拍：确保暗环境、激光打亮标记球、"
+                     f"球偏心放置且每个角度转向正确。"),
+            num_views=collector.count, num_failed=len(collector.errors),
+            elapsed_s=time.time() - t0)
+
     # --- 标定（复用原有 calibrate_axis）---
     points_path = os.path.join(archive_dir, "axis_points.npy")
     try:
@@ -602,7 +612,34 @@ def sweep_axis_calibration(
             num_views=collector.count, num_failed=len(collector.errors),
             elapsed_s=time.time() - t0)
 
+    # --- 质检：不合格**不写入**文件，避免坏标定被静默使用 ---
     rms = float(result.residual_rms)
+    radius_mm = float(result.radius) * 1e3
+    max_res_mm = float(_get("axis_calib.max_residual_mm", 1.0))
+    min_rad_mm = float(_get("axis_calib.min_radius_mm", 2.0))
+    problems = []
+    if rms * 1e3 > max_res_mm:
+        problems.append(
+            f"残差 RMS {rms * 1e3:.3f}mm > {max_res_mm:.3f}mm")
+    if abs(radius_mm) < min_rad_mm:
+        problems.append(
+            f"拟合圆半径 {radius_mm:.2f}mm < {min_rad_mm:.2f}mm"
+            f"（特征点几乎重合，说明取点失败）")
+    if problems:
+        # 不要留下坏的结果文件
+        try:
+            if out_path and os.path.exists(out_path):
+                os.remove(out_path)
+        except OSError:
+            pass
+        return AxisSweepResult(
+            ok=False,
+            message=("转轴标定质检未通过，已废弃："
+                     + "；".join(problems)
+                     + "。请检查标记球、环境光与取点方法后重拍。"),
+            num_views=collector.count, num_failed=len(collector.errors),
+            elapsed_s=time.time() - t0)
+
     msg = (f"转轴标定完成：{collector.count} 个视角，"
            f"半径 {result.radius * 1e3:.1f} mm，"
            f"残差 RMS {rms * 1e3:.3f} mm")
