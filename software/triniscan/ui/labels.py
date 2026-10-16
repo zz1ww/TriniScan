@@ -95,6 +95,7 @@ FIELD_LABELS: dict[str, str] = {
     "axis_calib.settle_ms": "到位稳定延时",
     "axis_calib.spot_threshold": "亮点灰度阈值",
     "axis_calib.spot_win_px": "亮点搜索窗口",
+    "axis_calib.spot_channel": "亮点取色通道",
     "axis_calib.min_radius_px": "球最小半径",
     "axis_calib.max_radius_px": "球最大半径",
     "axis_calib.robust": "稳健拟合",
@@ -105,6 +106,8 @@ FIELD_LABELS: dict[str, str] = {
     "laser_calib.robust_method": "稳健方法",
     "laser_calib.view_reject_mm": "视角剔除阈值",
     "laser_calib.outlier_mm": "离群距离阈值",
+    "laser_calib.save_images": "保存标定原图",
+    "laser_calib.clip_margin_px": "中心线裁剪边距",
 
     # --- 标定质量阈值 ---
     "quality.camera_rms_good": "相机 RMS 优秀",
@@ -147,6 +150,11 @@ FIELD_LABELS: dict[str, str] = {
     "reconstruction.iterative_iters": "迭代配准轮数",
     "reconstruction.poisson_depth": "Poisson 深度",
     "reconstruction.adaptive_depth": "深度自适应",
+    "reconstruction.axial": "轴向裁剪",
+    "reconstruction.axial.auto_trim": "自动主体区间",
+    "reconstruction.axial.height_min_m": "轴向下限(m)",
+    "reconstruction.axial.height_max_m": "轴向上限(m)",
+    "reconstruction.axial.radius_max_m": "半径上限(m)",
     "reconstruction.orient_max_nn": "法向近邻数",
     "reconstruction.density_quantile": "密度裁剪分位",
     "reconstruction.close_fallback": "封闭兜底策略",
@@ -207,8 +215,11 @@ FIELD_HINTS: dict[str, str] = {
     "camera_calib.min_images_for_pruning": "视角少于该数时不做自动剔除（保留足够约束）",
 
     "axis_calib.sphere_radius_m": "标记球半径（米）；乒乓球半径 0.020",
-    "axis_calib.method": "peak=最亮极点法（暗环境，推荐，不用 Hough）；"
-                         "sphere=球心法（亮背景，依赖 Hough 易失败）",
+    "axis_calib.method": "depth=球心高度约束反解（推荐：亮背景黑球，"
+                         "只需球心像素，抗半径抖动，最稳）；"
+                         "sphere=球心法（亮背景，依赖 Hough 像素半径，"
+                         "半径抖会放大深度误差）；"
+                         "peak=最亮极点法（需激光打中球，仅少数角度有效）",
     "axis_calib.save_images": "保存每个角度的原图，便于复查失败原因",
     "axis_calib.num_views": "转台采样角度数，建议 12",
     "axis_calib.min_views": "少于该数量则判定标定失败",
@@ -216,12 +227,15 @@ FIELD_HINTS: dict[str, str] = {
     "axis_calib.min_radius_mm": "拟合圆半径下限；过小说明取点失败（点挤在一起）",
     "axis_calib.spot_threshold": "亮点相对背景的灰度下限",
     "axis_calib.spot_win_px": "亮点亚像素定位的搜索窗口半径",
+    "axis_calib.spot_channel": "peak 法取亮点用的通道：red_laser 抑制亮背景最稳，green_laser/r/g/b 次之",
     "axis_calib.robust": "RANSAC 抗跳点，建议开启",
 
     "laser_calib.robust": "IRLS/RANSAC 抗离群，强烈建议开启",
     "laser_calib.robust_method": "irls 平滑加权；ransac 更耐大比例离群",
     "laser_calib.view_reject_mm": "单视角残差中位数超此值则剔除该视角",
     "laser_calib.outlier_mm": "稳健拟合的离群点距离阈值",
+    "laser_calib.save_images": "保存激光标定原图，便于复查中心线提取",
+    "laser_calib.clip_margin_px": "把中心线裁剪到棋盘格凸包内的额外边距；0=紧贴棋盘边界，可去除棋盘外的伪中心线点",
 
     "quality.camera_rms_good": "相机重投影 RMS 优秀线（px）",
     "quality.camera_rms_warn": "相机重投影 RMS 合格线（px），超过判不合格",

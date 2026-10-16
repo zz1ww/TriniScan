@@ -92,8 +92,8 @@ def test_panel_builds_and_labels_are_chinese(root):
     # 布尔项用中文显示
     assert panel._vars["volume.cross_check"].get() in ("是", "否")
     assert panel._vars["camera.auto_exposure"].get() in ("是", "否")
-    # 数值项仍是数字文本
-    assert panel._vars["scan.num_views"].get() == "180"
+    # 数值项仍是数字文本（不写死具体值，避免改配置就挂）
+    assert panel._vars["scan.num_views"].get().isdigit()
 
 
 def test_panel_bool_roundtrip_keeps_python_bool(root):

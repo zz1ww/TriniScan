@@ -223,12 +223,24 @@ class CalibrationPanel(ttk.Frame):
     def _current_mode(self) -> CalibMode:
         return CalibMode(self._mode.get())
 
+    def _save_images_for(self, mode: CalibMode) -> bool:
+        """各标定模式是否把采集图落盘（便于事后复盘）。
+
+        默认全部开启；可用配置项 ``<mode>_calib.save_images`` 单独关闭，
+        例如 ``laser_calib.save_images: false``。
+        也可用 ``output.save_calib_images: false`` 一键全关。
+        """
+        if not bool(self.cfg.get("output.save_calib_images", True)):
+            return False
+        key = f"{mode.value}_calib.save_images"
+        return bool(self.cfg.get(key, True))
+
     def _ensure_session(self) -> CaptureSession:
         mode = self._current_mode()
         if self._session is None or self._session.mode is not mode:
             self._session = CaptureSession(
                 mode, self.cfg,
-                save_images=(mode is CalibMode.CAMERA),
+                save_images=self._save_images_for(mode),
                 on_log=None,
             )
         return self._session

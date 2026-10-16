@@ -157,6 +157,7 @@ def calibrate_laser_plane(
     view_reject_mm: Optional[float] = 1.0,
     outlier_mm: Optional[float] = 0.5,
     min_views: int = 2,
+    clip_margin_px: float = 0.0,
 ) -> LaserCalibResult:
     """用棋盘格多姿态法标定激光平面（含稳健估计与输入校验）。
 
@@ -183,6 +184,9 @@ def calibrate_laser_plane(
     view_reject_mm : 单视角残差中位数超过此值则剔除该视角（mm；None 关闭）
     outlier_mm : 稳健拟合的离群距离阈值（mm；None 由尺度自适应）
     min_views : 可接受的最少有效视角数
+    clip_margin_px : 把激光中心线裁剪到棋盘格角点凸包内时允许的外扩余量
+        （像素）。默认 0 表示严格限制在凸包内；激光线若穿过棋盘格边缘
+        可适当放大（如 10~30），以保留贴边处的有效点。
 
     Returns
     -------
@@ -204,18 +208,32 @@ def calibrate_laser_plane(
             log.warning("视角 %d: 无法读取图像，跳过", idx)
             continue
 
-        plane_board = _solve_chessboard_plane(
+        board = _solve_chessboard_plane(
             gray, objp, pattern_size, K, dist
         )
-        if plane_board is None:
+        if board is None:
             log.warning("视角 %d: 棋盘格检测失败，跳过", idx)
             continue
+        plane_board, board_corners = board
 
-        pixels = _get_centerline(item, gray)
+        pixels = _get_centerline(item, _load_image(item))
         if pixels is None or len(pixels) < min_points_per_view:
             log.warning("视角 %d: 中心线点不足 (%d)，跳过",
                         idx, 0 if pixels is None else len(pixels))
             continue
+
+        # 裁剪到棋盘格范围内：丢弃落在棋盘格平面之外（打到木框/手/
+        # 背景）的激光线像素——它们是残差偏大的主因。
+        n_before = len(pixels)
+        pixels = _clip_centerline_to_board(
+            pixels, board_corners, margin_px=clip_margin_px)
+        n_after = len(pixels)
+        if n_after < min_points_per_view:
+            log.warning("视角 %d: 裁剪到棋盘格内后中心线点不足 "
+                        "(%d -> %d)，跳过", idx, n_before, n_after)
+            continue
+        log.debug("视角 %d: 中心线 %d -> %d 点（棋盘格内）",
+                  idx, n_before, n_after)
 
         pts = _intersect_pixels_with_plane(pixels, K, dist, plane_board)
         if len(pts) < min_points_per_view:
@@ -372,10 +390,39 @@ def _load_gray(item: dict) -> Optional[np.ndarray]:
     return img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
+def _load_image(item: dict) -> Optional[np.ndarray]:
+    """读取**原始图像**（保留 BGR 颜色），供颜色通道分离的中心线提取用。
+
+    棋盘格检测仍需灰度图（另由 :func:`_load_gray` 提供）。
+    """
+    if "gray" in item and item["gray"] is not None:
+        g = item["gray"]
+        # 若传入的已是灰度，转成 3 通道 BGR 以统一后续通道处理
+        if g.ndim == 2:
+            return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+        return g
+    path = item.get("image")
+    if path is None:
+        return None
+    img = read_image(path, must_exist=False)
+    if img is None:
+        return None
+    return img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
 def _solve_chessboard_plane(gray: np.ndarray, objp: np.ndarray,
                             pattern_size: tuple[int, int],
                             K: np.ndarray,
-                            dist: Optional[np.ndarray]) -> Optional[np.ndarray]:
+                            dist: Optional[np.ndarray]
+                            ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """检测棋盘格并求解其平面位姿。
+
+    Returns
+    -------
+    (plane, corners) 或 None
+        ``plane`` 为 (4,) 平面方程；``corners`` 为 (N,2) 亚像素角点像素
+        （用于把激光中心线裁剪到棋盘格范围内）。
+    """
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
     found, corners = cv2.findChessboardCorners(gray, pattern_size, flags)
     if not found:
@@ -391,7 +438,50 @@ def _solve_chessboard_plane(gray: np.ndarray, objp: np.ndarray,
     )
     if not ok:
         return None
-    return laser_plane_from_chessboard(rvec, tvec)
+    plane = laser_plane_from_chessboard(rvec, tvec)
+    return plane, corners.reshape(-1, 2).astype(np.float64)
+
+
+def _clip_centerline_to_board(pixels: np.ndarray, corners: np.ndarray,
+                              margin_px: float = 0.0
+                              ) -> np.ndarray:
+    """把中心线像素裁剪到棋盘格角点凸包内。
+
+    激光线常贯穿整幅图像（延伸到木框、手、背景等），这些位于棋盘格
+    **物理平面之外**的像素若参与反投影求交，会得到严重错误的三维点，
+    是激光平面标定残差偏大的主因。这里用角点凸包（可选外扩
+    ``margin_px`` 像素）只保留落在棋盘格范围内的中心线点。
+
+    Parameters
+    ----------
+    pixels : (N,2) 中心线像素 (x, y)
+    corners : (M,2) 棋盘格角点像素
+    margin_px : 凸包外扩余量（像素）；0 表示严格限制在凸包内。
+
+    Returns
+    -------
+    (K,2) 位于棋盘格内的中心线点（可能为空）。
+    """
+    pixels = np.asarray(pixels, dtype=np.float64).reshape(-1, 2)
+    corners = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+    if pixels.size == 0 or corners.size == 0:
+        return pixels.reshape(-1, 2)
+
+    hull = cv2.convexHull(corners.astype(np.float32)).reshape(-1, 2)
+
+    if margin_px and margin_px > 0:
+        # 以角点中心为基准，把凸包顶点沿径向外扩 margin_px 像素
+        center = hull.mean(axis=0)
+        vec = hull - center
+        norm = np.linalg.norm(vec, axis=1, keepdims=True)
+        norm[norm == 0] = 1.0
+        hull = (center + vec * (1.0 + margin_px / norm)).astype(np.float32)
+
+    inside = np.array([
+        cv2.pointPolygonTest(hull, (float(x), float(y)), False) >= 0
+        for x, y in pixels
+    ], dtype=bool)
+    return pixels[inside]
 
 
 def _get_centerline(item: dict,
@@ -412,6 +502,8 @@ def _get_centerline(item: dict,
         "smooth_sigma": item.get("smooth_sigma", 1.5),
         "steger_sigma": item.get("steger_sigma", 1.5),
         "roi": item.get("roi", None),
+        # 红色激光默认用颜色差分通道，压制棋盘格/背景等灰白干扰
+        "channel": item.get("channel", "red_laser"),
     })
     return extract_centerline(gray, cfg)
 

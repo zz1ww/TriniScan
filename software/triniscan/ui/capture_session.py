@@ -391,6 +391,9 @@ class CaptureSession:
             pattern_rows=self.pattern_rows,
             square_size_m=self.square_size_m,
             out_path=out_path,
+            view_reject_mm=self._cfg_get("laser_calib.view_reject_mm", 1.0),
+            outlier_mm=self._cfg_get("laser_calib.outlier_mm", 0.5),
+            clip_margin_px=self._cfg_get("laser_calib.clip_margin_px", 0.0),
         )
         msg = (f"激光平面标定完成：{result.num_views} 视角，"
                f"{result.num_points} 点，残差 RMS = "
@@ -529,8 +532,13 @@ def sweep_axis_calibration(
         algo_cfg={
             "spot_threshold": float(_get("axis_calib.spot_threshold", 60.0)),
             "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
+            "spot_channel": str(_get("axis_calib.spot_channel",
+                                     "red_laser")),
             "min_radius_px": float(_get("axis_calib.min_radius_px", 8.0)),
             "max_radius_px": float(_get("axis_calib.max_radius_px", 240.0)),
+            "vertical_hint": np.array(
+                [float(x) for x in _get("axis_calib.vertical_hint",
+                                        [0.0, 0.0, 1.0])]),
         },
     )
 

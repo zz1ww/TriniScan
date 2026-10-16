@@ -53,6 +53,53 @@ log = get_logger(__name__)
 __all__ = ["ScanPipeline", "ScanResult"]
 
 
+def _dominant_band(along: np.ndarray,
+                   bins: int = 120,
+                   density_ratio: float = 0.10) -> Optional[tuple]:
+    """在"沿轴坐标"直方图中找出最大密度连通区间（物体主体）。
+
+    转台扫描中，物体本体沿轴投影会形成一条**连续的高密度区间**，而背景/
+    支架表现为分离的小簇。本函数返回主体区间 ``(lo, hi)``（单位同输入），
+    用于自动剔除物体上下方的孤立环带。
+
+    Parameters
+    ----------
+    along : (N,) 各点沿轴坐标
+    bins : 直方图分箱数
+    density_ratio : 连通判据——某箱计数 > 该比例×峰值得以延续
+
+    Returns
+    -------
+    (lo, hi) 或 None（无法判定）
+    """
+    along = np.asarray(along, dtype=np.float64).ravel()
+    if along.size < 20 or along.ptp() < 1e-9:
+        return None
+    hist, edges = np.histogram(along, bins=bins)
+    peak = int(hist.max())
+    if peak <= 0:
+        return None
+    thr = max(1, int(round(peak * density_ratio)))
+    # 找最长连续"高密度"段
+    best = (0, -1)
+    i = 0
+    while i < len(hist):
+        if hist[i] > thr:
+            j = i
+            while j + 1 < len(hist) and hist[j + 1] > thr:
+                j += 1
+            if (j - i) > (best[1] - best[0]):
+                best = (i, j)
+            i = j + 1
+        else:
+            i += 1
+    if best[1] < best[0]:
+        return None
+    lo = float(edges[best[0]])
+    hi = float(edges[best[1] + 1])
+    return lo, hi
+
+
 @dataclass
 class ScanResult:
     """一次完整测量的结果。"""
@@ -64,6 +111,7 @@ class ScanResult:
     num_points: int
     mesh_watertight: bool
     cross_check_cm3: Optional[float] = None
+    hull_volume_cm3: Optional[float] = None       # 凸包体积（凸体更准）
     stages_s: dict[str, float] = field(default_factory=dict)
     mesh_path: Optional[str] = None
     points_path: Optional[str] = None
@@ -85,6 +133,7 @@ class ScanPipeline:
         self._laser_calib = None
         self._axis_calib = None
         self._calib_reports: list = []
+        self._last_hull_volume_cm3: Optional[float] = None
 
     # ------------------------------------------------------------------
     # 标定加载
@@ -287,6 +336,11 @@ class ScanPipeline:
         if bool(self.cfg.get("reconstruction.remove_turntable", True)):
             pcd, removal_info = self._remove_turntable(pcd)
 
+        # --- 轴向裁剪（剔除背景/支架孤立环带）---
+        pcd, axial_info = self._clip_axial_band(pcd)
+        removal_info = dict(removal_info)
+        removal_info["axial"] = axial_info
+
         pc_dir = ensure_dir(self.cfg.resolve("output.pointcloud_dir"))
         pc_path = os.path.join(pc_dir, "cloud.ply")
         try:
@@ -369,6 +423,85 @@ class ScanPipeline:
         new_pcd.points = o3d.utility.Vector3dVector(res.points)
         return new_pcd, info
 
+    def _clip_axial_band(self, pcd):
+        """按"沿轴高度 + 到轴半径"裁剪点云（剔除背景/支架等孤立环带）。
+
+        动机
+        ----
+        转台扫描时激光常同时打到**物体后方的背景/支架**，在点云里表现为
+        若干条与物体分离的环带（沿轴高度不同、半径也不同）。这类点用
+        RANSAC 平面拟合往往抓错目标（会误抓物体的竖直面）。而对"物体
+        相对转轴的几何"而言，**沿轴高度分布**最能分离它们。
+
+        策略（可配置，全部为 0/None 时不生效）：
+
+        1. ``axial.height_min_m`` / ``height_max_m``：硬门限，直接切掉
+           高度范围外的点（最直接、最可控）；
+        2. ``axial.radius_max_m``：切掉离轴过远的散点；
+        3. ``axial.auto_trim``：自动取"沿轴高度直方图的主体连通区间"，
+           把上方/下方孤立的小簇一并切掉（物体高度未知时的兜底）。
+
+        Returns
+        -------
+        (pcd, info)  info 含 applied/removed/reason
+        """
+        import open3d as o3d
+
+        if self._axis_calib is None:
+            return pcd, {"applied": False, "removed": 0, "reason": "无轴"}
+
+        pts = np.asarray(pcd.points, dtype=np.float64)
+        if len(pts) == 0:
+            return pcd, {"applied": False, "removed": 0, "reason": "空点云"}
+
+        axis = np.asarray(self._axis_calib.direction, dtype=np.float64)
+        axis = axis / max(np.linalg.norm(axis), 1e-12)
+        origin = np.asarray(self._axis_calib.point, dtype=np.float64)
+        rel = pts - origin
+        along = rel @ axis
+        perp = rel - np.outer(along, axis)
+        radius = np.linalg.norm(perp, axis=1)
+
+        keep = np.ones(len(pts), dtype=bool)
+        reasons = []
+
+        h_min = self.cfg.get("reconstruction.axial.height_min_m", None)
+        h_max = self.cfg.get("reconstruction.axial.height_max_m", None)
+        r_max = self.cfg.get("reconstruction.axial.radius_max_m", None)
+        auto = bool(self.cfg.get("reconstruction.axial.auto_trim", False))
+
+        if auto and h_min is None and h_max is None and r_max is None:
+            hi = _dominant_band(along)
+            if hi is not None:
+                lo_mm, hi_mm = hi
+                m = (along >= lo_mm) & (along <= hi_mm)
+                if m.sum() >= 20:
+                    keep &= m
+                    reasons.append(
+                        f"自动主体区间 [{lo_mm*1e3:.0f},"
+                        f"{hi_mm*1e3:.0f}] mm")
+
+        if h_min is not None:
+            keep &= along >= float(h_min)
+            reasons.append(f"h>={float(h_min)*1e3:.0f}mm")
+        if h_max is not None:
+            keep &= along <= float(h_max)
+            reasons.append(f"h<={float(h_max)*1e3:.0f}mm")
+        if r_max is not None:
+            keep &= radius <= float(r_max)
+            reasons.append(f"r<={float(r_max)*1e3:.0f}mm")
+
+        removed = int((~keep).sum())
+        if removed == 0:
+            return pcd, {"applied": False, "removed": 0,
+                         "reason": "无越界点"}
+        new_pcd = o3d.geometry.PointCloud()
+        new_pcd.points = o3d.utility.Vector3dVector(pts[keep])
+        log.info("轴向裁剪: 剔除 %d/%d 点（%s）",
+                 removed, len(pts), "，".join(reasons))
+        return new_pcd, {"applied": True, "removed": removed,
+                         "reason": "，".join(reasons)}
+
     # ------------------------------------------------------------------
     # 阶段 4：重建 + 封闭 + 体积
     # ------------------------------------------------------------------
@@ -398,6 +531,17 @@ class ScanPipeline:
             voxel_pitch=float(self.cfg.get("volume.voxel_pitch", 0.001)),
             cross_check=bool(self.cfg.get("volume.cross_check", True)),
         )
+
+        # 凸包体积：对凸体（方块、柱、球等）比 Poisson 更贴近真值。
+        # 二者不一致时说明点云含凹陷/噪声，值得人工复核。
+        self._last_hull_volume_cm3 = None
+        try:
+            import trimesh
+            hull = trimesh.PointCloud(
+                np.asarray(pcd.points)).convex_hull
+            self._last_hull_volume_cm3 = float(hull.volume * 1e6)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("凸包体积计算失败: %s", exc)
 
         mesh_dir = ensure_dir(self.cfg.resolve("output.mesh_dir"))
         mesh_path = os.path.join(mesh_dir, "mesh.ply")
@@ -459,6 +603,7 @@ class ScanPipeline:
             mesh_watertight=closed.watertight,
             cross_check_cm3=(vol.cross_check_m3 * 1e6
                              if vol.cross_check_m3 else None),
+            hull_volume_cm3=self._last_hull_volume_cm3,
             stages_s=stages,
             mesh_path=mesh_path,
             points_path=pc_path,
@@ -487,6 +632,8 @@ class ScanPipeline:
             log.info("已去除转盘点: %d", result.turntable_removed)
         if result.close_fallback:
             log.info("网格封闭兜底策略: %s", result.close_fallback)
+        if result.hull_volume_cm3 is not None:
+            log.info("凸包体积（凸体参考）: %.2f cm³", result.hull_volume_cm3)
         log.info("各阶段: %s", ", ".join(
             f"{k}={v:.1f}s" for k, v in result.stages_s.items()))
         log.info("=" * 52)

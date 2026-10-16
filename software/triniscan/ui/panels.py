@@ -21,7 +21,7 @@ _FIELD_CHOICES: dict[str, list] = {
         "steger", "gray_centroid", "parabola", "peak",
     ],
     "scan.num_views": [180, 150, 120, 90, 60],
-    "axis_calib.method": ["peak", "sphere"],
+    "axis_calib.method": ["peak", "sphere", "depth"],
 }
 
 

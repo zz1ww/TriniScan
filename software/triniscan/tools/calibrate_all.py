@@ -65,6 +65,9 @@ def _cmd_laser(args, cfg) -> int:
         pairs, cam.K, cam.dist,
         pattern_cols=args.cols, pattern_rows=args.rows,
         square_size_m=args.square, out_path=out,
+        view_reject_mm=cfg.get("laser_calib.view_reject_mm", 1.0),
+        outlier_mm=cfg.get("laser_calib.outlier_mm", 0.5),
+        clip_margin_px=cfg.get("laser_calib.clip_margin_px", 0.0),
     )
     return 0
 

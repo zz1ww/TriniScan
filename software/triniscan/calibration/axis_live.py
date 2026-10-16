@@ -53,6 +53,40 @@ class SpotNotFound(RuntimeError):
     """图像中未找到符合要求的标记点。"""
 
 
+@dataclass
+class _DepthAxisResult:
+    """``depth`` 法标定结果（字段与 axis_calib 结果对齐，便于 UI 复用）。"""
+
+    _res: dict
+
+    @property
+    def point(self):
+        return np.asarray(self._res["center"], dtype=np.float64)
+
+    @property
+    def direction(self):
+        return np.asarray(self._res["direction"], dtype=np.float64)
+
+    @property
+    def radius(self):
+        return float(self._res["radius"])
+
+    @property
+    def residual_rms(self):
+        return float(self._res["rms_mm"]) / 1e3
+
+    @property
+    def num_points(self):
+        return int(len(self._res["points"]))
+
+    @property
+    def num_inliers(self):
+        return int(len(self._res["points"]))
+
+    @property
+    def outlier_ratio(self):
+        return 0.0
+
 # ---------------------------------------------------------------------------
 # 通用工具
 # ---------------------------------------------------------------------------
@@ -73,8 +107,35 @@ class RegionOfInterest:
         return slice(v0, v1), slice(u0, u1)
 
 
-def _to_gray(image: np.ndarray) -> np.ndarray:
-    """转灰度 float32；彩色按 BGR 处理。"""
+def _to_gray(image: np.ndarray, channel: str = "gray") -> np.ndarray:
+    """转灰度 float32；彩色按 BGR 处理。
+
+    ``channel`` 用于**突出与干扰不同色的激光**，对红色激光强烈建议
+    ``"red_laser"``（``R - max(G,B)``）：黑白棋盘格、灰白背景、白墙
+    等 R≈G≈B，相减后≈0 被压制，只留红色激光斑点。
+
+    - ``"gray"``      : 普通灰度；
+    - ``"r"/"g"/"b"`` : 单通道；
+    - ``"red_laser"`` : ``R - max(G,B)``，突出红色激光；
+    - ``"green_laser"``: ``G - max(R,B)``，突出绿色激光。
+    """
+    ch = (channel or "gray").lower()
+    if image.ndim == 3 and ch in ("red_laser", "green_laser"):
+        b = image[..., 0].astype(np.float32)
+        g = image[..., 1].astype(np.float32)
+        r = image[..., 2].astype(np.float32)
+        if ch == "red_laser":
+            gray = r - np.maximum(g, b)
+        else:
+            gray = g - np.maximum(r, b)
+        gray = np.clip(gray, 0.0, None)
+        mx = float(gray.max())
+        if mx > 0:
+            gray = gray / mx * 255.0
+        return gray
+    if image.ndim == 3 and ch in ("r", "g", "b"):
+        idx = {"b": 0, "g": 1, "r": 2}[ch]
+        return np.asarray(image[..., idx], dtype=np.float32)
     if image.ndim == 2:
         gray = image
     else:
@@ -98,11 +159,16 @@ def _window(image: np.ndarray, roi: Optional[RegionOfInterest],
 def detect_spot_peak(image: np.ndarray,
                      threshold: float = 60.0,
                      roi: Optional[RegionOfInterest] = None,
-                     win_px: int = 25) -> np.ndarray:
-    """在（暗背景的）图像中定位激光亮点，返回亚像素 ``(u, v)``。
+                     win_px: int = 25,
+                     channel: str = "gray") -> np.ndarray:
+    """在图像中定位激光亮点，返回亚像素 ``(u, v)``。
 
-    思路：激光打在哑光**黑**球上形成全场最亮的斑点。先做背景抑制，
-    取显著亮点，再在其邻域内做**亮度平方加权质心**得到亚像素中心。
+    思路：激光打在哑光**黑**球上形成显著的亮点。先做背景抑制，取显著
+    亮点，再在其邻域内做**亮度平方加权质心**得到亚像素中心。
+
+    **强光/亮背景场景**：默认 ``channel="red_laser"`` 时按颜色差分
+    ``R - max(G,B)`` 提取，红激光被突出、白墙/亮背景/灰白棋盘被压制，
+    因此**无需关灯**也能稳定定位。
 
     Parameters
     ----------
@@ -110,12 +176,13 @@ def detect_spot_peak(image: np.ndarray,
     threshold : 亮点相对背景的灰度阈值
     roi : 可选搜索窗口（应先粗定位球的大致位置）
     win_px : 精定位窗口半径（像素）
+    channel : 色彩通道（见 :func:`_to_gray`），默认 ``"red_laser"``
 
     Raises
     ------
     SpotNotFound : 未找到满足条件的亮点
     """
-    gray = _to_gray(image)
+    gray = _to_gray(image, channel=channel)
     sub, off_y, off_x = _window(gray, roi, gray.shape)
     if sub.size == 0:
         raise SpotNotFound("搜索窗口为空")
@@ -280,9 +347,9 @@ class AxisLiveCollector:
                  method: str = "peak",
                  dist=None,
                  algo_cfg: Optional[dict] = None) -> None:
-        if method not in ("peak", "sphere"):
+        if method not in ("peak", "sphere", "depth"):
             raise ValueError(
-                f"未知方法 '{method}'，可选 'peak' / 'sphere'")
+                f"未知方法 '{method}'，可选 'peak' / 'sphere' / 'depth'")
         self.K = np.asarray(K, dtype=np.float64).reshape(3, 3)
         self.plane = np.asarray(plane, dtype=np.float64).reshape(4)
         self.dist = None if dist is None else np.asarray(dist,
@@ -297,6 +364,7 @@ class AxisLiveCollector:
         self.pixels: list[np.ndarray] = []      # 对应像素
         self.angles: list[float] = []           # 对应转台角度
         self.errors: list[str] = []             # 每个角度的失败原因
+        self._pixel_radii: list[float] = []     # depth 法用：像素半径
 
     # ------------------------------------------------------------------
     def add_image(self, image: np.ndarray,
@@ -309,6 +377,14 @@ class AxisLiveCollector:
         SpotNotFound : 该角度未找到标记点（调用方可跳过继续）
         """
         pixel = self.find_pixel(image, roi)
+        if self.method == "depth":
+            # 深度反解法：本帧先只记录像素+像素半径，3D 点在
+            # ``calibrate()`` 里由"圆约束 + 尺度锚"统一反解。
+            self.pixels.append(pixel)
+            self.angles.append(float(angle_deg))
+            self._pixel_radii.append(float(getattr(self, "_last_radius_px",
+                                                   0.0)))
+            return pixel
         point = self.pixel_to_point(pixel)
         self.points.append(point)
         self.pixels.append(pixel)
@@ -325,6 +401,7 @@ class AxisLiveCollector:
                 threshold=cfg.get("spot_threshold", 60.0),
                 roi=roi,
                 win_px=cfg.get("spot_win_px", 25),
+                channel=cfg.get("spot_channel", "red_laser"),
             )
         center, radius = detect_sphere_center(
             image,
@@ -333,7 +410,6 @@ class AxisLiveCollector:
         )
         self._last_radius_px = radius
         return center
-
     def pixel_to_point(self, pixel: np.ndarray) -> np.ndarray:
         """像素 → 3D 点。``peak`` 取球面交点；``sphere`` 取球心。"""
         pixel = np.asarray(pixel, dtype=np.float64).reshape(2)
@@ -359,11 +435,15 @@ class AxisLiveCollector:
     # ------------------------------------------------------------------
     @property
     def count(self) -> int:
+        if self.method == "depth":
+            return len(self.pixels)
         return len(self.points)
 
     @property
     def stack(self) -> np.ndarray:
         """已收集点组成的 (N,3) 数组。"""
+        if self.method == "depth" and self.points:
+            return np.asarray(self.points, dtype=np.float64).reshape(-1, 3)
         return (np.asarray(self.points, dtype=np.float64).reshape(-1, 3)
                 if self.points else np.empty((0, 3)))
 
@@ -375,20 +455,80 @@ class AxisLiveCollector:
         np.save(path, self.stack)
         log.info("已保存现场转轴点 (%d 点): %s", self.count, path)
 
+    def _refine_depth_outliers(self, res, cfg):
+        """对 depth 法结果做一次 MAD 离群剔除 + 重解。"""
+        from .axis_depth import assemble_axis_points_from_pixels
+
+        P = np.asarray(res["points"], dtype=np.float64)
+        c = np.asarray(res["center"], dtype=np.float64)
+        n = np.asarray(res["direction"], dtype=np.float64)
+        if len(P) < 8:
+            return res
+        # 每点到圆平面的偏差
+        cop = np.abs((P - c) @ n)
+        med = np.median(cop)
+        mad = np.median(np.abs(cop - med)) + 1e-12
+        thr = med + 3.5 * 1.4826 * mad
+        keep = cop <= thr
+        if keep.sum() < 6 or keep.all():
+            return res
+        log.info("depth 离群剔除: 保留 %d/%d 帧", int(keep.sum()), len(P))
+        pix = np.asarray(self.pixels, dtype=np.float64).reshape(-1, 2)[keep]
+        rpx = np.asarray(self._pixel_radii, dtype=np.float64)[keep]
+        return assemble_axis_points_from_pixels(
+            pix, self.K, dist=self.dist,
+            vertical_hint=cfg.get("vertical_hint",
+                                  np.array([0.0, 0.0, 1.0])),
+            radius_known=self.sphere_radius_m, radius_px=rpx)
+
     def calibrate(self, out_path: Optional[str] = None,
                   save_points_to: Optional[str] = None):
-        """用收集到的点完成转轴标定（调用原有 ``calibrate_axis``）。
+        """用收集到的点完成转轴标定。
 
-        传入采样角度以**固定转轴方向的符号**（右手定则），
-        避免多视角配准方向反向。
+        - ``peak``/``sphere``：调用原有 ``calibrate_axis``（传采样角度
+          以固定转轴方向符号，避免反向）。
+        - ``depth``：**高度约束反解**——本方法只收集了球心像素 + 像素
+          半径，此处用"所有球心共圆 + 平均半径定尺度"统一反解 3D 点，
+          再拟合转轴。可回避单目深度对半径的敏感。
         """
         from .axis_calib import calibrate_axis
+
+        if self.method == "depth":
+            return self._calibrate_depth(out_path, save_points_to)
 
         if save_points_to:
             self.save_points(save_points_to)
         angles = self.angles if len(self.angles) == self.count else None
         return calibrate_axis(self.stack, out_path=out_path,
                               angles_deg=angles)
+
+    def _calibrate_depth(self, out_path, save_points_to):
+        """depth 法：像素+像素半径 → 圆约束反解 3D → 转轴。"""
+        from .axis_depth import (assemble_axis_points_from_pixels,
+                                 write_axis_npz)
+
+        cfg = self.algo_cfg
+        res = assemble_axis_points_from_pixels(
+            np.asarray(self.pixels, dtype=np.float64).reshape(-1, 2),
+            self.K, dist=self.dist,
+            vertical_hint=cfg.get("vertical_hint",
+                                  np.array([0.0, 0.0, 1.0])),
+            radius_known=self.sphere_radius_m,
+            radius_px=np.asarray(self._pixel_radii, dtype=np.float64),
+        )
+        # 自动剔除离群帧（如误检到背景圆）：用"到圆平面的偏差 +
+        # 半径偏差"做 MAD 离群剔除，再重解一次，提升稳健性。
+        res = self._refine_depth_outliers(res, cfg)
+        # 记录反解出的 3D 点，便于保存/复查
+        self.points = [p for p in np.asarray(res["points"])]
+        if save_points_to:
+            self.save_points(save_points_to)
+
+        if out_path:
+            write_axis_npz(out_path, res["center"], res["direction"],
+                           res["radius"], res["rms_mm"] / 1e3,
+                           num_points=len(res["points"]))
+        return _DepthAxisResult(res)
 
     def add_angle(self, image: np.ndarray, angle_deg: float,
                   roi: Optional[RegionOfInterest] = None) -> np.ndarray:

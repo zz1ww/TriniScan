@@ -69,8 +69,9 @@ __all__ = [
 def preprocess(image: np.ndarray,
                roi: tuple[int, int, int, int] | list[int] | None = None,
                sigma: float = 1.0,
-               invert: bool = False) -> np.ndarray:
-    """统一预处理：BGR→灰度、ROI 裁剪、高斯平滑。
+               invert: bool = False,
+               channel: str = "gray") -> np.ndarray:
+    """统一预处理：色彩通道分离、ROI 裁剪、高斯平滑。
 
     Parameters
     ----------
@@ -80,19 +81,49 @@ def preprocess(image: np.ndarray,
     sigma : 高斯平滑标准差；<=0 表示不平滑。
     invert : 若条纹为暗背景上的亮线用 False（默认）；
              若为亮背景上的暗线则设 True。
+    channel : 色彩通道选择，用于**抑制与激光不同色的干扰**：
+
+        - ``"gray"``      : 普通灰度（默认）；
+        - ``"r"``/``"g"``/``"b"`` : 单通道；
+        - ``"red_laser"`` : ``R - max(G, B)``，突出红色激光、抑制
+          黑白棋盘格与灰白背景（黑白处 R≈G≈B，相减≈0）；
+        - ``"green_laser"``: ``G - max(R, B)``，绿激光对应。
+
+        对红色激光（650nm），强烈建议用 ``"red_laser"``：棋盘格边缘、
+        木框、手等灰白景象会被大幅压暗，中心线提取只保留激光本身。
 
     Returns
     -------
     gray : float64 灰度图
     """
     if image.ndim == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        ch = (channel or "gray").lower()
+        if ch in ("red_laser", "green_laser"):
+            b, g, r = (image[..., i].astype(np.float64)
+                       for i in range(3))
+            if ch == "red_laser":
+                gray = r - np.maximum(g, b)
+            else:
+                gray = g - np.maximum(r, b)
+            gray = np.clip(gray, 0.0, None)
+            # 颜色差分结果动态范围较小，拉伸到 0~255 便于统一阈值语义
+            mx = float(gray.max())
+            if mx > 0:
+                gray = gray / mx * 255.0
+        elif ch == "r":
+            gray = image[..., 2].astype(np.float64)
+        elif ch == "g":
+            gray = image[..., 1].astype(np.float64)
+        elif ch == "b":
+            gray = image[..., 0].astype(np.float64)
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image.copy()
 
     if roi is not None:
         x, y, w, h = (int(v) for v in roi)
-        mask = np.zeros_like(gray)
+        mask = np.zeros(gray.shape, dtype=gray.dtype)
         mask[y:y + h, x:x + w] = 255
         gray = cv2.bitwise_and(gray, mask)
 
@@ -471,6 +502,7 @@ def extract_centerline(image: np.ndarray, config) -> np.ndarray:
     threshold = float(_cfg_get(config, "threshold", 60.0))
     invert = bool(_cfg_get(config, "invert", False))
     min_pixels = int(_cfg_get(config, "min_pixels", 1))
+    channel = str(_cfg_get(config, "channel", "gray"))
 
     # Steger 法自带高斯微分平滑，无需额外预处理平滑（避免过度模糊）；
     # 其余方法用 smooth_sigma 预处理。
@@ -479,7 +511,8 @@ def extract_centerline(image: np.ndarray, config) -> np.ndarray:
     else:
         sigma_pre = float(_cfg_get(config, "smooth_sigma", 1.0))
 
-    gray = preprocess(image, roi=roi, sigma=sigma_pre, invert=invert)
+    gray = preprocess(image, roi=roi, sigma=sigma_pre, invert=invert,
+                      channel=channel)
 
     func = _METHODS[method]
     if method == "steger":

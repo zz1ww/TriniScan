@@ -16,45 +16,51 @@ turntable:
   steps_per_rev: 200
   microstep: 32
   gear_ratio: 5.18
-  settle_ms: 200
+  settle_ms: 2000
   timeout_s: 5.0
 scan:
-  angle_step_deg: 2.0
-  num_views: 180        # 视角数，可选 180/150/120/90/60（转角自动=360/n）
-  timeout_s: 60
+  angle_step_deg: 1.0
+  num_views: 360
+  timeout_s: 120
 calibration:
   camera_file: software/config/calib_camera.npz
   laser_file: software/config/calib_laser.npz
   axis_file: software/config/calib_axis.npz
-  # 转轴来源：z_axis(默认,不标定,假设相机系Z轴) | calibrated(用 axis_file)
-  # 成熟开源转台扫描器通行做法：转台轴=物理竖直轴，不标定即可；
-  # 若需严格物理竖直，改用 calibrated 并保证轴标定可靠。
-  axis_mode: z_axis
-  z_axis_point: [0.0, 0.0, 0.0]   # z_axis 模式下轴上一点（相机系）
-  z_axis_dir: [0.0, 0.0, 1.0]     # z_axis 模式下的轴方向（相机系）
+  axis_mode: calibrated
+  z_axis_point:
+  - 0.0
+  - 0.0
+  - 0.0
+  z_axis_dir:
+  - 0.0
+  - 0.0
+  - 1.0
   strict: false
 camera_calib:
   pattern_cols: 11
   pattern_rows: 8
   square_size_m: 0.01
   images_glob: assets/calibration_targets/chessboard/*.png
-  use_sb: true          # 优先用 sector-based 检测器（精度更高，旧版 OpenCV 自动回退）
-  auto_prune: true      # 自动剔除重投影误差过大的坏图
-  min_images_for_pruning: 8   # 视角少于该数时不做自动剔除
+  use_sb: true
+  auto_prune: true
+  min_images_for_pruning: 8
 axis_calib:
   sphere_radius_m: 0.02
-  # peak: 暗环境下激光打在标记球上的**最亮斑点**做亚像素质心（推荐，稳健）
-  # sphere: 亮背景下检测黑球轮廓反求球心（依赖 Hough，环境光下易失败）
-  method: peak
-  save_images: true       # 强制保存每个角度的原始图，便于复查/复标
-  num_views: 12
+  # depth  = 球心高度约束反解（推荐：亮背景黑球，只用球心像素，抗半径抖动）
+  #          开灯即可，最稳；球心在图像中画圆即可标定。
+  # sphere = 黑球圆法（依赖像素半径，半径抖动会放大深度误差）
+  # peak   = 激光亮点法（需激光打中球；线激光只有少数角度打中，慎用）
+  method: depth
+  save_images: true
+  num_views: 24
   step_deg: 30.0
-  min_views: 6            # 少于该角度数视为标定失败
-  max_residual_mm: 1.0    # 圆拟合残差 RMS 上限(mm)，超过判为失败
-  min_radius_mm: 2.0      # 拟合圆半径下限(mm)，过小说明点挤在一起(坏标定)
-  settle_ms: 250
-  spot_threshold: 60.0
+  min_views: 6
+  max_residual_mm: 1.0
+  min_radius_mm: 2.0
+  settle_ms: 2000
+  spot_threshold: 40.0
   spot_win_px: 25
+  spot_channel: red_laser
   min_radius_px: 8.0
   max_radius_px: 240.0
   robust: true
@@ -64,24 +70,24 @@ laser_calib:
   robust_method: irls
   view_reject_mm: 1.0
   outlier_mm: 0.5
+  save_images: true
+  clip_margin_px: 0.0
 laser:
   wavelength_nm: 650
   power_mw: 1.0
   safety_class: 2
 quality:
-  camera_rms_good: 0.30
-  camera_rms_warn: 0.50
-  laser_rms_good: 0.30
-  laser_rms_warn: 0.50
-  axis_rms_good: 0.10
-  axis_rms_warn: 0.30
+  camera_rms_good: 0.3
+  camera_rms_warn: 0.5
+  laser_rms_good: 0.3
+  laser_rms_warn: 0.5
+  axis_rms_good: 0.1
+  axis_rms_warn: 0.3
 extraction:
-  method: row_peak     # 默认逐行（竖直线激光最优；对零散亮点免疫）
-  # row_peak(逐行峰值+抛物线,默认) | row_centroid(逐行重心)
-  # steger(最准/慢) | gray_centroid(逐列均衡) | parabola(逐列最快) | peak(逐列最粗)
+  method: row_peak
   threshold: 60.0
   smooth_sigma: 1.5
-  subpixel: true       # row_peak 是否做抛物线亚像素插值
+  subpixel: true
   steger_sigma: 1.5
   steger_merge: normal
   steger_min_sep_px: 1.0
@@ -91,18 +97,17 @@ extraction:
   roi: null
 reconstruction:
   voxel_size: 0.0005
-  icp_refine: false     # 角度已知的转台：不做 ICP/位姿图，纯几何旋转拼接
+  icp_refine: false
   global_align: true
   pose_graph: true
   edge_span: 3
   iterative_iters: 3
-  # --- 物理边界过滤（剔除环境光/反光远点，"飞碟"主因）---
-  depth_filter: true    # 三角测量后按相机系深度剔除远点
-  depth_min_m: 0.0      # 深度下限(m)，0=不限
-  depth_max_m: 0.30     # 深度上限(m)；本物体约0.17~0.28m，远点0.29~0.37m
-  bounds_radius_m: 0.0  # 世界系距轴半径上限(m)，0=不限（建议设为转台半径）
-  bounds_z_min_m: null  # 世界系沿轴坐标下限(m)，null=不限
-  bounds_z_max_m: null  # 世界系沿轴坐标上限(m)，null=不限
+  depth_filter: true
+  depth_min_m: 0.0
+  depth_max_m: 0.3
+  bounds_radius_m: 0.0
+  bounds_z_min_m: null
+  bounds_z_max_m: null
   poisson_depth: 9
   adaptive_depth: true
   orient_max_nn: 30
@@ -117,6 +122,14 @@ reconstruction:
   turntable_band_below_m: 0.0015
   turntable_keep_upper_only: true
   turntable_radius_m: null
+  # 轴向裁剪：剔除物体后方背景/支架形成的孤立环带（按沿轴高度分离）
+  #   auto_trim=true 会自动取"物体主体高度区间"，物体高度未知时最省心；
+  #   也可用 height_min_m/height_max_m 显式给出硬门限（更可控）。
+  axial:
+    auto_trim: true
+    height_min_m: null
+    height_max_m: null
+    radius_max_m: null
 volume:
   method: divergence
   voxel_pitch: 0.001
