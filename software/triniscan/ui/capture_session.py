@@ -172,7 +172,7 @@ class CaptureSession:
 
     def evaluate(self, image: np.ndarray) -> QualityVerdict:
         """仅做质量评价，不改变会话状态（供实时提示用）。"""
-        from ..calibration import detect_chessboard_quality
+        from ..algorithms.calibration import detect_chessboard_quality
 
         det = detect_chessboard_quality(
             image, self.pattern_cols, self.pattern_rows)
@@ -333,7 +333,7 @@ class CaptureSession:
             )
 
     def _calibrate_camera(self, t0: float) -> CalibOutcome:
-        from ..calibration import calibrate_camera
+        from ..algorithms.calibration import calibrate_camera
 
         out_path = self._cfg_get(
             "calibration.camera_file", None)
@@ -362,7 +362,7 @@ class CaptureSession:
         )
 
     def _calibrate_laser(self, t0: float) -> CalibOutcome:
-        from ..calibration import (
+        from ..algorithms.calibration import (
             calibrate_laser_plane,
             load_camera_calib,
         )
@@ -410,7 +410,7 @@ class CaptureSession:
     def calibrate_axis_from_points(
             self, feature_points: np.ndarray) -> CalibOutcome:
         """由绕轴旋转的特征点三维坐标完成转轴标定。"""
-        from ..calibration import calibrate_axis
+        from ..algorithms.calibration import calibrate_axis
 
         t0 = time.time()
         out_path = self._cfg_get("calibration.axis_file", None)
@@ -481,8 +481,9 @@ def sweep_axis_calibration(
     """
     import cv2
 
-    from ..calibration import AxisLiveCollector, load_camera_calib
-    from ..calibration import load_laser_calib
+    from ..algorithms.calibration import (AxisLiveCollector,
+                                          load_camera_calib)
+    from ..algorithms.calibration import load_laser_calib
 
     t0 = time.time()
 
@@ -545,10 +546,10 @@ def sweep_axis_calibration(
 
     # --- 打开设备 ---
     if make_camera is None:
-        from ..camera import Camera as _Camera
+        from ..hardware.camera import Camera as _Camera
         make_camera = lambda: _Camera(cfg.raw["camera"])
     if make_turntable is None:
-        from ..turntable.controller import Turntable as _Turntable
+        from ..hardware.turntable import Turntable as _Turntable
         make_turntable = lambda: _Turntable(cfg.raw["turntable"])
 
     archive_dir = _get("axis_calib.archive_dir",

@@ -155,8 +155,10 @@ class MainWindow(ttk.Frame):
 
         # 左：配置
         left = ttk.Frame(paned)
-        self.config_panel = ConfigPanel(left, self.cfg,
-                                        on_change=self._on_config_change)
+        self.config_panel = ConfigPanel(
+            left, self.cfg,
+            on_change=self._on_config_change,
+            on_error=self._on_config_error)
         self.config_panel.pack(fill="both", expand=True)
         paned.add(left, weight=1)
 
@@ -252,6 +254,18 @@ class MainWindow(ttk.Frame):
                                       int(round(360.0 / step)))
         except (TypeError, ValueError):
             pass  # 非法输入交由字段校验，不联动
+
+    def _on_config_error(self, key_path: str, messages: list) -> None:
+        """参数校验失败：状态栏提示 + 日志，**不写进配置**。
+
+        旧版对越界值是完全静默的：``poisson_depth=-1`` 会一路传到
+        Open3D 才报错，错误信息与"配置"毫无关系。这里在输入处就拦下。
+        """
+        first = messages[0] if messages else "参数不合法"
+        status = getattr(self, "status", None)
+        if status is not None:
+            status.configure(text=f"⚠️ {first}")
+        self._append_log(f"[参数错误] {first}")
 
     def _on_store_change(self, store: ConfigStore,
                          key_path: str, value) -> None:
@@ -427,14 +441,14 @@ class MainWindow(ttk.Frame):
         port = str(cfg.get("turntable.port", ""))
 
         def job(report):
-            from ..camera import Camera
+            from ..hardware.camera import Camera
             report("打开相机…", 0.3)
             with Camera(cfg.raw["camera"]) as cam:
                 report("抓取图像…", 0.7)
                 image = cam.grab()
             # 顺手把该帧中心线画出来
             try:
-                from ..extraction import extract_centerline
+                from ..algorithms.extraction import extract_centerline
                 pixels = extract_centerline(image,
                                             cfg.raw.get("extraction", {}))
                 return image, pixels
@@ -460,7 +474,7 @@ class MainWindow(ttk.Frame):
             # 计算中心线
             try:
                 import cv2
-                from ..extraction import extract_centerline
+                from ..algorithms.extraction import extract_centerline
                 img = cv2.imread(path)
                 pixels = extract_centerline(
                     img, self.cfg.raw.get("extraction", {}))
@@ -649,6 +663,11 @@ def launch(config_path: Optional[str] = None,
     root.protocol("WM_DELETE_WINDOW",
                   lambda: _on_close(root, app))
     app._append_log(f"项目根: {cfg.root}")
+    try:
+        from .algorithm_list import all_domains_summary
+        app._append_log("已注册算法:\n" + all_domains_summary())
+    except Exception as exc:  # noqa: BLE001
+        app._append_log(f"算法清单读取失败: {exc}")
     app._append_log(f"配置文件: {app.store.path}")
     app._append_log("就绪。可在左侧编辑参数，改完点『💾 保存配置』"
                     "写回文件；测量/标定始终使用当前配置。")

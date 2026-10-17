@@ -190,6 +190,7 @@ FIELD_LABELS: dict[str, str] = {
     "reconstruction.cluster_eps_m": "聚类半径(m)",
     "reconstruction.cluster_min_points": "聚类最少点数",
     "reconstruction.cluster_keep_top": "保留簇数",
+    "reconstruction.filter_chain": "过滤链",
 
     # --- 体积计算 ---
     "volume.method": "计算方法",
@@ -306,6 +307,7 @@ FIELD_HINTS: dict[str, str] = {
     "reconstruction.cluster_eps_m": "DBSCAN 邻域半径，略大于平均点间距",
     "reconstruction.cluster_min_points": "成为核心点的最少邻居数",
     "reconstruction.cluster_keep_top": "保留点数最多的前 k 个簇",
+    "reconstruction.filter_chain": "按顺序执行的过滤器列表，如 [{name: depth}, {name: cluster, eps_m: 0.003}]；留空则回退到上面各项的开关",
 
     "laser.wavelength_nm": "激光波长，用于安全说明",
     "laser.power_mw": "激光功率，注意安全",

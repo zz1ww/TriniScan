@@ -1,4 +1,8 @@
-"""相机采集模块。"""
-from .capture import Camera, CameraConfig
+"""【兼容层】旧的 ``triniscan.camera`` 路径。
 
-__all__ = ["Camera", "CameraConfig"]
+实现已迁移到 :mod:`triniscan.hardware.camera`。
+"""
+from __future__ import annotations
+
+from ..hardware.camera import *                 # noqa: F401,F403
+from ..hardware.camera import __all__           # noqa: F401

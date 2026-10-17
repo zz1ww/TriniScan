@@ -44,6 +44,44 @@ _PREVIEW_MAX_SIDE = 720
 _LIVE_INTERVAL_MS = 60
 
 
+#: 转轴取点方法的界面说明（补充算法声明里的简写）
+_AXIS_METHOD_LABELS: dict[str, str] = {
+    "depth": "激光深度法（快，需激光标定）",
+    "sphere": "球心法（亮背景）",
+    "peak": "最亮极点法（关环境光）",
+}
+
+
+def _axis_method_choices() -> list[tuple[str, str]]:
+    """转轴取点方法的候选值，**来自算法声明** ``axis_calib.method``。
+
+    声明里没有时退回 ``("depth", "sphere")``，保证界面永远可用。
+    """
+    try:
+        from .algorithm_list import choices_for_key
+        raw = choices_for_key("axis_calib.method")
+    except Exception:  # noqa: BLE001
+        raw = None
+    if not raw:
+        raw = ["depth", "sphere"]
+    return [(v, _AXIS_METHOD_LABELS.get(v, v)) for v in raw]
+
+
+def _axis_method_default() -> str:
+    """``axis_calib.method`` 的默认值（取声明的 ``default``）。"""
+    try:
+        from .algorithm_list import REGISTRY_NAMES, entries, spec_for
+        for domain in REGISTRY_NAMES:
+            for e in entries(domain):
+                spec = spec_for(domain, e.name)
+                for p in getattr(spec, "params", ()) or ():
+                    if p.name == "axis_calib.method":
+                        return str(p.default)
+    except Exception:  # noqa: BLE001
+        pass
+    return "depth"
+
+
 class CalibrationPanel(ttk.Frame):
     """标定面板：实时拍摄 + 质量检测 + 自动标定。
 
@@ -79,7 +117,8 @@ class CalibrationPanel(ttk.Frame):
             value=self._cfg_str("axis_calib.sphere_radius_m", 0.020,
                                 scale=1000.0))
         self._axis_method = tk.StringVar(
-            value=self._cfg_str("axis_calib.method", "peak"))
+            value=self._cfg_str("axis_calib.method",
+                                _axis_method_default()))
         self._axis_views = tk.StringVar(
             value=self._cfg_str("axis_calib.num_views", 12))
         self._axis_sweep_active = False
@@ -156,12 +195,13 @@ class CalibrationPanel(ttk.Frame):
         m = ttk.Frame(self.axis_opts)
         m.pack(fill="x", padx=8, pady=(2, 6))
         ttk.Label(m, text="取点方法:").pack(side="left")
-        ttk.Radiobutton(m, text="最亮极点法（关环境光）", value="peak",
-                        variable=self._axis_method).pack(side="left",
-                                                         padx=4)
-        ttk.Radiobutton(m, text="球心法（亮背景）", value="sphere",
-                        variable=self._axis_method).pack(side="left",
-                                                         padx=4)
+        # 候选项来自算法声明（axis_calib.method 的 choices），
+        # 不再在这里手写——旧版写死 "peak"/"sphere"，其中 "peak"
+        # 根本不是合法值（声明里只有 depth/sphere），选中后运行才报错。
+        for value, text in _axis_method_choices():
+            ttk.Radiobutton(m, text=text, value=value,
+                            variable=self._axis_method).pack(
+                                side="left", padx=4)
 
         self.lbl_axis_hint = ttk.Label(
             self.axis_opts, foreground="#8a5a00", wraplength=760,
@@ -290,7 +330,7 @@ class CalibrationPanel(ttk.Frame):
 
         def _run() -> None:
             try:
-                from ..camera import Camera
+                from ..hardware.camera import Camera
                 with Camera(self.cfg.raw["camera"]) as cam:
                     self._camera = cam
                     self._queue.put(("live_started", None))
@@ -329,7 +369,7 @@ class CalibrationPanel(ttk.Frame):
 
     def _shoot_once(self) -> None:
         try:
-            from ..camera import Camera
+            from ..hardware.camera import Camera
             with Camera(self.cfg.raw["camera"]) as cam:
                 img = cam.grab()
         except Exception as exc:  # noqa: BLE001

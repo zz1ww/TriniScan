@@ -112,10 +112,22 @@ extraction:
   enhance_scale_to_width: true
   enhance_min_peak: 0.0
 reconstruction:
+  # 过滤链：按顺序执行，每层产出"保留掩膜"并汇总到报告。
+  # 删除上面 config，启用下面这一段即可显式控制顺序与逐项参数。
+  # 不写 filter_chain 时，自动回退到旧式扁平键（depth_filter /
+  # bounds_radius_m / cluster_filter / remove_turntable / axial.*）。
+  filter_chain:
+    - {name: depth}
+    - {name: bounds, enable: false}    # bounds_radius_m=0 时本就等于不启用
+    - {name: cluster}
+    - {name: turntable, method: axis_height}
+    - {name: axial, auto_trim: true}
+    # 统计离群默认关闭：线结构光点云密度不均，开启容易成片误删真实表面
+    # - {name: statistical, nb_neighbors: 20, std_ratio: 2.0}
   voxel_size: 0.0005
   icp_refine: false
-  global_align: true
-  pose_graph: true
+  global_align: false
+  pose_graph: false
   edge_span: 3
   iterative_iters: 3
   depth_filter: true

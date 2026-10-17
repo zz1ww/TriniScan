@@ -23,28 +23,25 @@ from typing import Optional
 
 import numpy as np
 
-from ..camera import Camera
-from ..turntable import (
+from ..hardware.camera import Camera
+from ..hardware.turntable import (
     Turntable,
     TurntableConfig,
     apply_scan_plan,
     resolve_scan_plan,
 )
-from ..extraction import extract_centerline
-from ..reconstruction import (
-    ViewCloud,
-    register_views,
-    reconstruct_mesh,
-    estimate_table_height,
-    remove_small_clusters,
-    remove_turntable_axis_height,
-    remove_turntable_surface,
-    triangulate,
-    filter_by_depth,
-    filter_by_bounds,
-)
-from ..volume import close_mesh, compute_volume
-from ..calibration import (
+from ..algorithms.extraction import extract_centerline
+from ..algorithms.features.triangulate import triangulate
+from ..algorithms.registration.register import ViewCloud, register_views
+from ..algorithms.meshing.mesh import reconstruct_mesh
+from ..algorithms.filtering import (FilterChain, dominant_band,
+                                    estimate_table_height, filter_by_bounds,
+                                    filter_by_depth, remove_small_clusters,
+                                    remove_turntable_axis_height,
+                                    remove_turntable_surface)
+from ..algorithms.closing.close_mesh import close_mesh
+from ..algorithms.volumetry.volume import compute_volume
+from ..algorithms.calibration import (
     AxisCalibResult,
     load_axis_calib,
     load_camera_calib,
@@ -53,6 +50,13 @@ from ..calibration import (
     format_reports,
     reports_to_dict,
 )
+from ..algorithms.registration.specs import SEQUENTIAL_SPEC
+from ..algorithms.extraction.specs import centerline_view
+from ..algorithms.meshing.specs import POISSON_SPEC
+from ..algorithms.closing.specs import CLOSE_SPEC
+from ..algorithms.volumetry.specs import (DIVERGENCE_SPEC, VOXEL_SPEC)
+from ..algorithms.calibration.specs import quality_thresholds
+from ..contracts import CalibrationBundle, Cloud, RunContext, ScanReport
 from ..common.io_utils import ensure_dir
 from ..common.logging_utils import get_logger
 
@@ -73,48 +77,24 @@ def _table_supports_steps(table) -> bool:
 def _dominant_band(along: np.ndarray,
                    bins: int = 120,
                    density_ratio: float = 0.10) -> Optional[tuple]:
-    """在"沿轴坐标"直方图中找出最大密度连通区间（物体主体）。
+    """【兼容别名】→ :func:`triniscan.algorithms.filtering.dominant_band`。
 
-    转台扫描中，物体本体沿轴投影会形成一条**连续的高密度区间**，而背景/
-    支架表现为分离的小簇。本函数返回主体区间 ``(lo, hi)``（单位同输入），
-    用于自动剔除物体上下方的孤立环带。
-
-    Parameters
-    ----------
-    along : (N,) 各点沿轴坐标
-    bins : 直方图分箱数
-    density_ratio : 连通判据——某箱计数 > 该比例×峰值得以延续
-
-    Returns
-    -------
-    (lo, hi) 或 None（无法判定）
+    实现已迁到 filtering 包（那里是轴向裁剪插件的正主）。保留此别名是
+    为了让旧测试/旧脚本 ``from triniscan.core.pipeline import _dominant_band``
+    继续可用。
     """
-    along = np.asarray(along, dtype=np.float64).ravel()
-    if along.size < 20 or along.ptp() < 1e-9:
-        return None
-    hist, edges = np.histogram(along, bins=bins)
-    peak = int(hist.max())
-    if peak <= 0:
-        return None
-    thr = max(1, int(round(peak * density_ratio)))
-    # 找最长连续"高密度"段
-    best = (0, -1)
-    i = 0
-    while i < len(hist):
-        if hist[i] > thr:
-            j = i
-            while j + 1 < len(hist) and hist[j + 1] > thr:
-                j += 1
-            if (j - i) > (best[1] - best[0]):
-                best = (i, j)
-            i = j + 1
-        else:
-            i += 1
-    if best[1] < best[0]:
-        return None
-    lo = float(edges[best[0]])
-    hi = float(edges[best[1] + 1])
-    return lo, hi
+    return dominant_band(along, bins=bins, density_ratio=density_ratio)
+
+
+def _to_open3d(cloud) -> "object":
+    """把 :class:`Cloud` 转成 Open3D 点云（惰性 import，避免拖慢启动）。"""
+    import open3d as o3d
+
+    points = cloud.points if isinstance(cloud, Cloud) else cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(
+        np.asarray(points, dtype=np.float64).reshape(-1, 3))
+    return pcd
 
 
 @dataclass
@@ -138,7 +118,23 @@ class ScanResult:
     turntable_removed: int = 0                     # 去除的转盘点数
     turntable_applied: bool = False
     close_fallback: str = ""                       # 封闭兜底策略
+    #: 封闭是否走了**有损**降级（体素/凸包）。True 时体积只能作参考。
+    close_degraded: bool = False
+    #: 降级说明（含面数保留率），直接可展示
+    close_degrade_reason: str = ""
+    #: 兜底后 / 兜底前的面数比。凸包通常 < 0.01
+    mesh_face_retention: float = 1.0
     calib_reports: list[dict] = field(default_factory=list)
+    # --- 过滤诊断（来自 MaskStack）---
+    #: 每层过滤的结构化摘要，字段见 :meth:`MaskStack.to_dict`
+    filter_layers: list[dict] = field(default_factory=list)
+    #: 预格式化的过滤表（直接给 UI / 日志，避免各处重造格式）
+    filter_summary: str = ""
+    #: 原始点数（过滤前）与最终保留点数
+    points_before_filter: int = 0
+    points_after_filter: int = 0
+    #: 标定指纹：同一指纹下两次扫描的差异才是算法差异
+    calib_fingerprint: str = ""
 
 
 class ScanPipeline:
@@ -151,6 +147,15 @@ class ScanPipeline:
         self._axis_calib = None
         self._calib_reports: list = []
         self._last_hull_volume_cm3: Optional[float] = None
+        # 过滤链产物（新）
+        self._last_masks = None
+        self._last_filter_report: Optional[ScanReport] = None
+        self._last_close_degraded: bool = False
+        self._last_close_degrade_reason: str = ""
+        self._last_face_retention: float = 1.0
+        # 旧读取路径（由 _sync_legacy_filter_state 从 MaskStack 投影而来）
+        self._last_bounds: dict = {"applied": False, "removed": 0}
+        self._last_turntable: dict = {"applied": False, "removed": 0}
 
     # ------------------------------------------------------------------
     # 标定加载
@@ -226,27 +231,13 @@ class ScanPipeline:
         )
 
     def _quality_thresholds(self) -> dict:
-        """从配置拼装阈值覆盖（缺省则用 quality 模块默认值）。"""
-        def _pair(prefix: str) -> Optional[dict]:
-            good = self.cfg.get(f"quality.{prefix}_good", None)
-            warn = self.cfg.get(f"quality.{prefix}_warn", None)
-            if good is None and warn is None:
-                return None
-            d = {}
-            if good is not None:
-                d["good"] = good
-            if warn is not None:
-                d["warn"] = warn
-            return d
+        """标定质量阈值覆盖（缺省用 quality 模块默认值）。
 
-        overrides = {}
-        for name, key in (("camera", "camera_rms"),
-                          ("laser", "laser_rms"),
-                          ("axis", "axis_rms")):
-            pair = _pair(key)
-            if pair:
-                overrides[name] = pair
-        return overrides
+        实现见 :func:`triniscan.algorithms.calibration.specs.quality_thresholds`
+        ——键名来自 ``ParamSpec`` 声明，拼写错误在 import 期暴露，而不是
+        静默地"阈值不生效"。
+        """
+        return quality_thresholds(self.cfg)
 
     # ------------------------------------------------------------------
     # 阶段 1：采集
@@ -316,7 +307,9 @@ class ScanPipeline:
         K = self._cam_calib.K
         dist = self._cam_calib.dist
         plane = self._laser_calib.plane
-        ex_cfg = self.cfg.raw.get("extraction", {})
+        # 提取参数：从声明读取（带类型转换与范围校验）。
+        # 重构前直接传 cfg.raw["extraction"]，越界值要跑到算法内部才报错。
+        ex_cfg = centerline_view(self.cfg)
         min_pts = int(self.cfg.get("extraction.min_points", 50))
 
         # 深度门限配置（相机系，单位 m）
@@ -352,41 +345,22 @@ class ScanPipeline:
     def build_pointcloud(self, clouds: list[ViewCloud]):
         if self._axis_calib is None:
             self.load_calibrations()
-        voxel = float(self.cfg.get("reconstruction.voxel_size", 0.0005))
+        reg_params = SEQUENTIAL_SPEC.read(self.cfg)
         reg = register_views(
             clouds,
             self._axis_calib.point,
             self._axis_calib.direction,
-            voxel_size=voxel,
-            icp_refine=bool(self.cfg.get("reconstruction.icp_refine", True)),
-            global_align=bool(
-                self.cfg.get("reconstruction.global_align", True)),
-            pose_graph=bool(
-                self.cfg.get("reconstruction.pose_graph", True)),
-            edge_span=int(self.cfg.get("reconstruction.edge_span", 3)),
-            iterative_iters=int(
-                self.cfg.get("reconstruction.iterative_iters", 3)),
             return_result=True,
+            **reg_params,
         )
-        pcd = reg.pointcloud
+        log.debug("配准参数: %s", reg_params)
 
-        # --- 世界系物理边界过滤（半径 / 轴向）---
-        pcd, bounds_info = self._filter_bounds(pcd)
+        # --- 过滤链（边界 / 连通域 / 去转盘 / 轴向裁剪 …）---
+        cloud, masks, ctx = self._run_filter_chain(reg.pointcloud)
+        self._last_masks = masks
+        self._last_filter_report = ctx.report
 
-        # --- 连通域去噪（剔除反光簇/支架残片等密集小团）---
-        pcd, cluster_info = self._filter_clusters(pcd)
-
-        # --- 去转盘表面 ---
-        removal_info = {"applied": False, "removed": 0}
-        if bool(self.cfg.get("reconstruction.remove_turntable", True)):
-            pcd, removal_info = self._remove_turntable(pcd)
-        removal_info = dict(removal_info)
-        removal_info["cluster"] = cluster_info
-
-        # --- 轴向裁剪（剔除背景/支架孤立环带）---
-        pcd, axial_info = self._clip_axial_band(pcd)
-        removal_info["axial"] = axial_info
-
+        pcd = _to_open3d(cloud)
         pc_dir = ensure_dir(self.cfg.resolve("output.pointcloud_dir"))
         pc_path = os.path.join(pc_dir, "cloud.ply")
         try:
@@ -397,248 +371,180 @@ class ScanPipeline:
             pc_path = None
 
         self._last_register_method = reg.method
-        self._last_turntable = removal_info
-        self._last_bounds = bounds_info
+        self._sync_legacy_filter_state(masks)
         return pcd, pc_path
 
-    def _filter_bounds(self, pcd):
-        """按世界系物理边界（半径 + 轴向）剔除越界点，返回 ``(pcd, info)``。
-
-        与"去转盘"不同，这里剔除的是**转台半径之外 / 高度范围之外**的
-        虚假点（反光、环境光）。半径门限需显式配置
-        ``reconstruction.bounds_radius_m`` 才生效，避免误伤大物体。
-        """
-        import open3d as o3d
-
-        r_max = float(self.cfg.get("reconstruction.bounds_radius_m", 0.0) or 0.0)
-        z_min = self.cfg.get("reconstruction.bounds_z_min_m", None)
-        z_max = self.cfg.get("reconstruction.bounds_z_max_m", None)
-        info = {"applied": False, "removed": 0}
-        if r_max <= 0 and z_min is None and z_max is None:
-            return pcd, info
-
-        pts = np.asarray(pcd.points, dtype=np.float64)
-        res = filter_by_bounds(
-            pts, axis_point=self._axis_calib.point,
-            axis_dir=self._axis_calib.direction,
-            radius_max=r_max,
-            z_min=(float(z_min) if z_min is not None else None),
-            z_max=(float(z_max) if z_max is not None else None),
-        )
-        info = {"applied": res.applied, "removed": res.num_removed,
-                "reason": res.reason}
-        if not res.applied or res.num_removed == 0:
-            return pcd, info
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(res.points)
-        return new_pcd, info
-
-    def _filter_clusters(self, pcd):
-        """连通域去噪：剔除反光簇/支架残片等**密集小团**，返回 ``(pcd, info)``。
-
-        与边界过滤/统计离群不同，这里针对的是"在界内、且点与点紧邻"
-        的噪声团——它们邻居不少，统计离群抓不到；但它们在空间上形成
-        **小连通域**，物体是最大的那个簇。默认关闭
-        （``reconstruction.cluster_filter``），开启后按配置聚类。
-        """
-        import open3d as o3d
-
-        if not bool(self.cfg.get("reconstruction.cluster_filter", False)):
-            return pcd, {"applied": False, "removed": 0,
-                         "reason": "未启用"}
-        pts = np.asarray(pcd.points, dtype=np.float64)
-        res = remove_small_clusters(
-            pts,
-            eps=float(self.cfg.get("reconstruction.cluster_eps_m", 0.002)),
-            min_points=int(
-                self.cfg.get("reconstruction.cluster_min_points", 10)),
-            keep_top=int(self.cfg.get("reconstruction.cluster_keep_top", 1)),
-        )
-        info = {"applied": res.applied, "removed": res.num_removed,
-                "reason": res.reason}
-        if not res.applied or res.num_removed == 0:
-            return pcd, info
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(res.points)
-        return new_pcd, info
-
-    def _remove_turntable(self, pcd):
-        """对世界系点云做转盘去除，返回 ``(pcd, info)``。
-
-        两种方法（``reconstruction.turntable_method``）：
-
-        - ``"axis_height"``：**轴基准高度法**（推荐）。直接用轴标定给出
-          的 ``h_table`` 切割，不依赖点云中的平面结构，对"物体有竖直面"
-          更稳健。``h_table`` 未配置时由 :func:`estimate_table_height`
-          从点云自动估计。
-        - ``"ransac"``：RANSAC 拟合主平面 + 法向校验（旧行为，默认）。
-        """
-        import open3d as o3d
-
-        pts = np.asarray(pcd.points, dtype=np.float64)
-        method = str(self.cfg.get("reconstruction.turntable_method",
-                                  "ransac")).lower()
-        radius = self.cfg.get("reconstruction.turntable_radius_m", None)
-        margin = float(
-            self.cfg.get("reconstruction.turntable_margin_m", 0.0005))
-
-        if method == "axis_height":
-            h_table = self.cfg.get("reconstruction.turntable_height_m", None)
-            if h_table is None:
-                h_table = estimate_table_height(
-                    pts, self._axis_calib.point, self._axis_calib.direction)
-            if h_table is None:
-                info = {"applied": False, "removed": 0,
-                        "reason": "无法估计 h_table，跳过"}
-                return pcd, info
-            res = remove_turntable_axis_height(
-                pts, self._axis_calib.point, self._axis_calib.direction,
-                float(h_table),
-                margin=margin,
-                band_below=float(self.cfg.get(
-                    "reconstruction.turntable_band_below_m", 0.002)),
-                radius=(float(radius) if radius else None),
+    # ------------------------------------------------------------------
+    # 过滤链：唯一的过滤入口
+    # ------------------------------------------------------------------
+    def make_context(self) -> RunContext:
+        """构造本次扫描的运行上下文（配置 + 标定 + 报告）。"""
+        calib = None
+        if self._cam_calib is not None or self._axis_calib is not None:
+            calib = CalibrationBundle(
+                camera=self._cam_calib,
+                laser=self._laser_calib,
+                axis=self._axis_calib,
+                reports=list(self._calib_reports),
+                axis_mode=str(self.cfg.get("calibration.axis_mode", "z_axis")),
             )
-        else:
-            res = remove_turntable_surface(
-                pts,
-                axis_dir=self._axis_calib.direction,
-                axis_point=self._axis_calib.point,
-                ransac_dist=float(
-                    self.cfg.get("reconstruction.turntable_plane_tol_m",
-                                 0.001)),
-                min_inlier_ratio=float(
-                    self.cfg.get("reconstruction.turntable_min_inlier", 0.15)),
-                align_tol_deg=float(
-                    self.cfg.get("reconstruction.turntable_align_tol_deg",
-                                 15.0)),
-                margin=margin,
-                band_below=float(
-                    self.cfg.get("reconstruction.turntable_band_below_m",
-                                 0.0015)),
-                keep_upper_only=bool(
-                    self.cfg.get("reconstruction.turntable_keep_upper_only",
-                                 True)),
-                radius=(float(radius) if radius else None),
-            )
-        info = {
-            "applied": res.applied, "removed": res.num_removed,
-            "reason": res.reason,
-        }
-        if not res.applied or res.num_removed == 0:
-            return pcd, info
+        return RunContext(
+            cfg=self.cfg,
+            report=ScanReport(),
+            calib=calib,
+            axis_point=(None if self._axis_calib is None
+                        else np.asarray(self._axis_calib.point)),
+            axis_dir=(None if self._axis_calib is None
+                      else np.asarray(self._axis_calib.direction)),
+        )
 
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(res.points)
-        return new_pcd, info
+    def _run_filter_chain(self, pcd):
+        """对配准后的点云执行完整过滤链。
 
-    def _clip_axial_band(self, pcd):
-        """按"沿轴高度 + 到轴半径"裁剪点云（剔除背景/支架等孤立环带）。
-
-        动机
-        ----
-        转台扫描时激光常同时打到**物体后方的背景/支架**，在点云里表现为
-        若干条与物体分离的环带（沿轴高度不同、半径也不同）。这类点用
-        RANSAC 平面拟合往往抓错目标（会误抓物体的竖直面）。而对"物体
-        相对转轴的几何"而言，**沿轴高度分布**最能分离它们。
-
-        策略（可配置，全部为 0/None 时不生效）：
-
-        1. ``axial.height_min_m`` / ``height_max_m``：硬门限，直接切掉
-           高度范围外的点（最直接、最可控）；
-        2. ``axial.radius_max_m``：切掉离轴过远的散点；
-        3. ``axial.auto_trim``：自动取"沿轴高度直方图的主体连通区间"，
-           把上方/下方孤立的小簇一并切掉（物体高度未知时的兜底）。
+        这是**唯一**的过滤入口。链路顺序来自配置
+        （``reconstruction.filter_chain``）；未写该键时自动回退到旧式扁平
+        键，行为与重构前逐字一致。
 
         Returns
         -------
-        (pcd, info)  info 含 applied/removed/reason
+        (Cloud, MaskStack, RunContext)
         """
-        import open3d as o3d
+        ctx = self.make_context()
+        cloud = Cloud(np.asarray(pcd.points, dtype=np.float64),
+                      frame="world", source="registration")
+        chain = FilterChain.from_config(self.cfg)
+        log.info("过滤链: %s", " → ".join(chain.names()) or "(空)")
+        out, masks = chain.apply(cloud, ctx)
+        if masks is not None:
+            log.info("\n%s", masks.summary())
+        return out, masks, ctx
+
+    # ------------------------------------------------------------------
+    # 【兼容层】旧的四个私有过滤方法
+    # ------------------------------------------------------------------
+    # 主流程已改为 ``FilterChain``（见 :meth:`build_pointcloud`）。
+    # 下面四个方法保留是为了：旧测试、外部脚本、以及 UI 里"单独试一下
+    # 某个过滤"的调用点。它们现在只是**把 Open3D 对象翻译成 Cloud，
+    # 交给对应插件执行，再翻译回去**，因此行为与新链路严格一致。
+    #
+    # 新代码请直接用 :meth:`_run_filter_chain` 或 FilterChain。
+    # ------------------------------------------------------------------
+    def _run_single_filter(self, name: str, pcd):
+        """对单个过滤器跑一次，返回 ``(pcd, info)``（兼容旧签名）。"""
+        from ..contracts import FILTERS
+        from ..contracts import RunContext
 
         if self._axis_calib is None:
-            return pcd, {"applied": False, "removed": 0, "reason": "无轴"}
+            self.load_calibrations()
+        ctx = self.make_context()
+        cloud = Cloud(np.asarray(pcd.points, dtype=np.float64),
+                      frame="world", source=name)
+        plugin = FILTERS.get(name)()
+        out, report = plugin.run(cloud, ctx)
+        info = dict(report.extra)
+        info.setdefault("applied", False)
+        info.setdefault("removed", report.n_in - report.n_out)
+        if not info["applied"]:
+            return pcd, info
+        if report.n_out == 0:
+            return _to_open3d(out), info
+        return _to_open3d(out), info
 
-        pts = np.asarray(pcd.points, dtype=np.float64)
-        if len(pts) == 0:
-            return pcd, {"applied": False, "removed": 0, "reason": "空点云"}
+    def _filter_bounds(self, pcd):
+        """【兼容】按世界系半径 + 轴向高度剔除越界点 → ``(pcd, info)``。
 
-        axis = np.asarray(self._axis_calib.direction, dtype=np.float64)
-        axis = axis / max(np.linalg.norm(axis), 1e-12)
-        origin = np.asarray(self._axis_calib.point, dtype=np.float64)
-        rel = pts - origin
-        along = rel @ axis
-        perp = rel - np.outer(along, axis)
-        radius = np.linalg.norm(perp, axis=1)
+        转调 :class:`~triniscan.algorithms.filtering.bounds.BoundsFilter`。
+        三个门限全空时不启用（``applied=False``）。
+        """
+        return self._run_single_filter("bounds", pcd)
 
-        keep = np.ones(len(pts), dtype=bool)
-        reasons = []
+    def _filter_clusters(self, pcd):
+        """【兼容】连通域去噪 → ``(pcd, info)``。
 
-        h_min = self.cfg.get("reconstruction.axial.height_min_m", None)
-        h_max = self.cfg.get("reconstruction.axial.height_max_m", None)
-        r_max = self.cfg.get("reconstruction.axial.radius_max_m", None)
-        auto = bool(self.cfg.get("reconstruction.axial.auto_trim", False))
+        转调 :class:`~triniscan.algorithms.filtering.cluster.ClusterFilter`。
+        ``reconstruction.cluster_filter=false`` 时插件不生效。
 
-        if auto and h_min is None and h_max is None and r_max is None:
-            hi = _dominant_band(along)
-            if hi is not None:
-                lo_mm, hi_mm = hi
-                m = (along >= lo_mm) & (along <= hi_mm)
-                if m.sum() >= 20:
-                    keep &= m
-                    reasons.append(
-                        f"自动主体区间 [{lo_mm*1e3:.0f},"
-                        f"{hi_mm*1e3:.0f}] mm")
+        ⚠️ ``cluster_keep_top=1`` 会把除最大簇以外的**全部**点删掉，
+        若物体在某处断成两簇，少的那一簇就是"少一面"的来源。
+        """
+        if not bool(self.cfg.get("reconstruction.cluster_filter", False)):
+            return pcd, {"applied": False, "removed": 0, "reason": "未启用"}
+        return self._run_single_filter("cluster", pcd)
 
-        if h_min is not None:
-            keep &= along >= float(h_min)
-            reasons.append(f"h>={float(h_min)*1e3:.0f}mm")
-        if h_max is not None:
-            keep &= along <= float(h_max)
-            reasons.append(f"h<={float(h_max)*1e3:.0f}mm")
-        if r_max is not None:
-            keep &= radius <= float(r_max)
-            reasons.append(f"r<={float(r_max)*1e3:.0f}mm")
+    def _remove_turntable(self, pcd):
+        """【兼容】去转盘表面 → ``(pcd, info)``。
 
-        removed = int((~keep).sum())
-        if removed == 0:
-            return pcd, {"applied": False, "removed": 0,
-                         "reason": "无越界点"}
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(pts[keep])
-        log.info("轴向裁剪: 剔除 %d/%d 点（%s）",
-                 removed, len(pts), "，".join(reasons))
-        return new_pcd, {"applied": True, "removed": removed,
-                         "reason": "，".join(reasons)}
+        转调 :class:`~triniscan.algorithms.filtering.turntable.TurntableFilter`，
+        方法由 ``reconstruction.turntable_method``（axis_height / ransac）决定。
+        """
+        return self._run_single_filter("turntable", pcd)
+
+    def _clip_axial_band(self, pcd):
+        """【兼容】按沿轴高度 / 半径裁剪 → ``(pcd, info)``。
+
+        转调 :class:`~triniscan.algorithms.filtering.axial.AxialTrimFilter`。
+        """
+        return self._run_single_filter("axial", pcd)
+
+    # ------------------------------------------------------------------
+    def _sync_legacy_filter_state(self, masks) -> None:
+        """把 MaskStack 汇总回旧的 ``_last_turntable`` / ``_last_bounds``。
+
+        旧代码（日志、结果文件、UI）从这两个属性读过滤统计；新链路只产出
+        ``MaskStack``。这里做一次投影，保证**两条读取路径数值一致**。
+
+        ``removed`` 取的是**该层自身**删掉的点数（增量），而不是累计值：
+        累计值在"第 2 层之后"已经包含了第 1 层的删除量，拿去做诊断只会
+        误导。累计量请看 :meth:`MaskStack.cumulative`。
+        """
+        if masks is None:
+            self._last_bounds = {"applied": False, "removed": 0}
+            self._last_turntable = {"applied": False, "removed": 0}
+            return
+
+        cascade = masks.cumulative()        # {name: 该层之后的剩余点数}
+
+        def _layer(name):
+            layer = masks.layers.get(name)
+            if layer is None:
+                return {"applied": False, "removed": 0, "reason": "未执行"}
+            prev = cascade.get(name, len(layer.mask)) + layer.removed
+            return {
+                "applied": bool(layer.applied),
+                "removed": int(layer.removed),
+                "reason": layer.reason,
+                "input": int(prev),
+            }
+
+        self._last_bounds = _layer("bounds")
+        tt = _layer("turntable")
+        tt["cluster"] = _layer("cluster")
+        tt["axial"] = _layer("axial")
+        self._last_turntable = tt
 
     # ------------------------------------------------------------------
     # 阶段 4：重建 + 封闭 + 体积
     # ------------------------------------------------------------------
     def measure_volume(self, pcd) -> tuple:
-        mesh_result = reconstruct_mesh(
-            pcd,
-            poisson_depth=int(
-                self.cfg.get("reconstruction.poisson_depth", 9)),
-            density_quantile=float(
-                self.cfg.get("reconstruction.density_quantile", 0.02)),
-            adaptive_depth=bool(
-                self.cfg.get("reconstruction.adaptive_depth", True)),
-            orient_max_nn=int(
-                self.cfg.get("reconstruction.orient_max_nn", 30)),
-        )
-        closed = close_mesh(
-            mesh_result.mesh,
-            fallback=str(self.cfg.get("reconstruction.close_fallback",
-                                      "bottom_plane")),
-            axis_dir=self._axis_calib.direction,
-            allow_convex_hull=bool(
-                self.cfg.get("reconstruction.allow_convex_hull", True)),
-        )
+        # 参数一律经 spec 读取：默认值单一来源、越界立即报错。
+        mesh_params = POISSON_SPEC.read(self.cfg)
+        mesh_result = reconstruct_mesh(pcd, **mesh_params)
+        log.debug("重建参数: %s", mesh_params)
+
+        close_params = CLOSE_SPEC.read(self.cfg)
+        closed = close_mesh(mesh_result.mesh,
+                            axis_dir=self._axis_calib.direction,
+                            **close_params)
+
+        # 主算法与校核体素尺寸分别来自各自 spec，避免两处默认值漂移
+        div_params = DIVERGENCE_SPEC.read(self.cfg)
+        voxel_params = VOXEL_SPEC.read(self.cfg)
         vol = compute_volume(
             closed.mesh,
             method=str(self.cfg.get("volume.method", "divergence")),
-            voxel_pitch=float(self.cfg.get("volume.voxel_pitch", 0.001)),
+            voxel_pitch=float(voxel_params["pitch"]),
             cross_check=bool(self.cfg.get("volume.cross_check", True)),
+            require_watertight=bool(div_params["require_watertight"]),
         )
 
         # 凸包体积：对凸体（方块、柱、球等）比 Poisson 更贴近真值。
@@ -667,6 +573,15 @@ class ScanPipeline:
         except Exception as exc:  # noqa: BLE001
             log.warning("OBJ 保存失败: %s", exc)
         self._last_close_fallback = closed.fallback_used
+        self._last_close_degraded = bool(getattr(closed, "degraded", False))
+        self._last_close_degrade_reason = str(
+            getattr(closed, "degrade_reason", ""))
+        self._last_face_retention = float(
+            getattr(closed, "face_retention", 1.0))
+        if self._last_close_degraded:
+            # 降级不是错误，但必须让用户看见——否则"体积偏小/偏大"
+            # 会永远被归咎于算法，而真正原因是封闭兜底抹掉了形状。
+            log.warning("网格封闭降级: %s", self._last_close_degrade_reason)
         return vol, closed, mesh_path
 
     # ------------------------------------------------------------------
@@ -702,6 +617,25 @@ class ScanPipeline:
 
         reg_method = getattr(self, "_last_register_method", "")
         tt = getattr(self, "_last_turntable", {"applied": False, "removed": 0})
+        masks = self._last_masks
+        if masks is not None:
+            filter_layers = masks.to_dict()["layers"]
+            filter_summary = masks.summary()
+            n_before, n_after = masks.n, masks.n_keep
+        else:
+            filter_layers, filter_summary = [], ""
+            n_before = n_after = 0
+        fingerprint = ""
+        if self._cam_calib is not None:
+            try:
+                fingerprint = CalibrationBundle(
+                    camera=self._cam_calib, laser=self._laser_calib,
+                    axis=self._axis_calib,
+                    axis_mode=str(self.cfg.get("calibration.axis_mode",
+                                               "z_axis")),
+                ).fingerprint()
+            except Exception as exc:      # noqa: BLE001 - 指纹失败不影响测量
+                log.debug("标定指纹计算失败: %s", exc)
 
         result = ScanResult(
             volume_cm3=vol.volume_cm3,
@@ -721,7 +655,16 @@ class ScanPipeline:
             turntable_removed=int(tt.get("removed", 0)),
             turntable_applied=bool(tt.get("applied", False)),
             close_fallback=getattr(self, "_last_close_fallback", ""),
+            close_degraded=getattr(self, "_last_close_degraded", False),
+            close_degrade_reason=getattr(
+                self, "_last_close_degrade_reason", ""),
+            mesh_face_retention=getattr(self, "_last_face_retention", 1.0),
             calib_reports=reports_to_dict(self._calib_reports),
+            filter_layers=filter_layers,
+            filter_summary=filter_summary,
+            points_before_filter=n_before,
+            points_after_filter=n_after,
+            calib_fingerprint=fingerprint,
         )
         self._log_result(result)
         return result
