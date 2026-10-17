@@ -379,7 +379,7 @@ class CaptureSession:
             )
 
         cam = load_camera_calib(cam_file)
-        pairs = [{"gray": img} for img in self.images]
+        pairs = [{"bgr": img} for img in self.images]
 
         out_path = self._cfg_get("calibration.laser_file", None)
         if out_path and not os.path.isabs(out_path):
@@ -394,6 +394,7 @@ class CaptureSession:
             view_reject_mm=self._cfg_get("laser_calib.view_reject_mm", 1.0),
             outlier_mm=self._cfg_get("laser_calib.outlier_mm", 0.5),
             clip_margin_px=self._cfg_get("laser_calib.clip_margin_px", 0.0),
+            channel=self._cfg_get("laser_calib.channel", "red_laser"),
         )
         msg = (f"激光平面标定完成：{result.num_views} 视角，"
                f"{result.num_points} 点，残差 RMS = "

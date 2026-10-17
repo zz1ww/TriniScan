@@ -95,6 +95,13 @@ def preprocess(image: np.ndarray,
     Returns
     -------
     gray : float64 灰度图
+
+    Notes
+    -----
+    **黑白（单通道）相机自适应**：若 ``image.ndim == 2``（相机直出灰度），
+    则无论 ``channel`` 配置为何一律按 ``"gray"`` 处理——此时颜色差分
+    （``red_laser`` / ``green_laser``）无意义，若不降级会静默失效或
+    报错。这样黑白相机与彩色相机可**共用同一套配置与代码路径**。
     """
     if image.ndim == 3:
         ch = (channel or "gray").lower()
@@ -119,6 +126,9 @@ def preprocess(image: np.ndarray,
         else:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
+        # 单通道（黑白相机直出）：颜色差分通道自动降级为 gray
+        if (channel or "gray").lower() not in ("gray", ""):
+            log.debug("单通道图像：提取通道 '%s' 自动降级为 gray", channel)
         gray = image.copy()
 
     if roi is not None:
@@ -513,6 +523,36 @@ def extract_centerline(image: np.ndarray, config) -> np.ndarray:
 
     gray = preprocess(image, roi=roi, sigma=sigma_pre, invert=invert,
                       channel=channel)
+
+    # 可选：图像级条纹增强（双阈值平滑 + 峰值窗口掩膜）。
+    # 默认关闭，保证不影响既有行为；开启见 extraction.enhance_enable。
+    # **只作用于灰度图，不改变任何提取算法**。
+    #
+    # 注：配置项采用**扁平键**（``enhance_enable`` / ``enhance_threshold``
+    # 等）而非嵌套字典，这样 UI 配置面板才能自动渲染成"是/否"下拉框
+    # 与数值输入框。兼容旧的嵌套写法 ``enhance: {enable: ...}``。
+    _enh = _cfg_get(config, "enhance", None)
+    if isinstance(_enh, dict):                       # 旧嵌套写法（向后兼容）
+        def _ev(k, d):
+            return _enh.get(k, d)
+    else:                                            # 扁平键（推荐）
+        def _ev(k, d):
+            return _cfg_get(config, "enhance_" + k, d)
+
+    if bool(_ev("enable", False)):
+        from .stripe_enhance import enhance_stripe
+        use_scale = bool(_ev("scale_to_width", True))
+        gray = enhance_stripe(
+            gray,
+            threshold=float(_ev("threshold", threshold)),
+            blur_ksize=int(_ev("blur_ksize", 5)),
+            window=int(_ev("window", 9)),
+            enable_window=bool(_ev("window_enable", True)),
+            enable_double_threshold=bool(
+                _ev("double_threshold_enable", True)),
+            scale_to_width=(gray.shape[1] if use_scale else None),
+            min_peak=float(_ev("min_peak", 0.0)),
+        )
 
     func = _METHODS[method]
     if method == "steger":

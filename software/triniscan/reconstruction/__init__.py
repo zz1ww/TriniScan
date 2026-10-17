@@ -14,12 +14,15 @@ from .mesh import (
 )
 from .turntable_removal import (
     TurntableRemovalResult,
+    estimate_table_height,
+    remove_turntable_axis_height,
     remove_turntable_surface,
 )
 from .point_filter import (
     FilterResult,
     filter_by_depth,
     filter_by_bounds,
+    remove_small_clusters,
 )
 
 __all__ = [
@@ -28,5 +31,7 @@ __all__ = [
     "MeshResult", "reconstruct_mesh", "reconstruct_mesh_ball_pivoting",
     "prepare_normals",
     "TurntableRemovalResult", "remove_turntable_surface",
+    "estimate_table_height", "remove_turntable_axis_height",
     "FilterResult", "filter_by_depth", "filter_by_bounds",
+    "remove_small_clusters",
 ]

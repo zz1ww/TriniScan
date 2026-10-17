@@ -158,6 +158,7 @@ def calibrate_laser_plane(
     outlier_mm: Optional[float] = 0.5,
     min_views: int = 2,
     clip_margin_px: float = 0.0,
+    channel: str = "gray",
 ) -> LaserCalibResult:
     """用棋盘格多姿态法标定激光平面（含稳健估计与输入校验）。
 
@@ -187,12 +188,21 @@ def calibrate_laser_plane(
     clip_margin_px : 把激光中心线裁剪到棋盘格角点凸包内时允许的外扩余量
         （像素）。默认 0 表示严格限制在凸包内；激光线若穿过棋盘格边缘
         可适当放大（如 10~30），以保留贴边处的有效点。
+    channel : 中心线提取通道。
+
+        - ``"red_laser"``（彩色相机推荐）：``R - max(G, B)``，压制棋盘格
+          灰白背景、木框与环境光；
+        - ``"gray"``（黑白相机）：普通灰度。
+        - 若图像本身是单通道，``preprocess`` 会**自动降级**为 gray，
+          因此彩色配置用于黑白相机也不会报错。可被每个 ``pairs`` 元素里
+          的 ``channel`` 键覆盖。
 
     Returns
     -------
     LaserCalibResult
     """
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+    default_channel = ("gray" if channel is None else str(channel)) or "gray"
     _validate_inputs(pattern_cols, pattern_rows, square_size_m,
                      min_points_per_view, min_views)
     objp = _chessboard_object_points(pattern_cols, pattern_rows, square_size_m)
@@ -216,7 +226,7 @@ def calibrate_laser_plane(
             continue
         plane_board, board_corners = board
 
-        pixels = _get_centerline(item, _load_image(item))
+        pixels = _get_centerline(item, _load_image(item), default_channel)
         if pixels is None or len(pixels) < min_points_per_view:
             log.warning("视角 %d: 中心线点不足 (%d)，跳过",
                         idx, 0 if pixels is None else len(pixels))
@@ -377,37 +387,53 @@ def _chessboard_object_points(cols: int, rows: int,
     return objp
 
 
-def _load_gray(item: dict) -> Optional[np.ndarray]:
-    if "gray" in item and item["gray"] is not None:
-        g = item["gray"]
-        return g if g.ndim == 2 else cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
+def _pick_image(item: dict) -> Optional[np.ndarray]:
+    """取出**原始图像**（尽量保留 BGR 彩色）。
+
+    支持的键（按优先级）：
+
+    - ``"bgr"`` / ``"image_arr"`` : 原始彩色/灰度数组（推荐，彩色相机用）；
+    - ``"image"`` : 图像路径（按 IMREAD_COLOR 读入，保留颜色）；
+    - ``"gray"`` : 灰度数组（兼容旧调用；此时无法恢复颜色）。
+    """
+    for key in ("bgr", "image_arr", "gray"):
+        if key in item and item[key] is not None:
+            return item[key]
     path = item.get("image")
     if path is None:
         return None
-    img = read_image(path, must_exist=False)
+    return read_image(path, flags=cv2.IMREAD_COLOR, must_exist=False)
+
+
+def _load_gray(item: dict) -> Optional[np.ndarray]:
+    """取得**灰度图**（供棋盘格检测用）。
+
+    彩色输入按 BGR→GRAY 转换；灰度输入原样返回。
+    """
+    img = _pick_image(item)
     if img is None:
         return None
     return img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
 def _load_image(item: dict) -> Optional[np.ndarray]:
-    """读取**原始图像**（保留 BGR 颜色），供颜色通道分离的中心线提取用。
+    """读取**原始图像**（尽可能保留 BGR 颜色），供颜色通道分离的中心线提取。
 
     棋盘格检测仍需灰度图（另由 :func:`_load_gray` 提供）。
+
+    Notes
+    -----
+    - 传入彩色图 → 原样返回（3 通道），``red_laser`` 等颜色差分可用；
+    - 传入灰度图 → 转成 3 通道 BGR（各通道相同），此时颜色差分等价于
+      灰度，``preprocess`` 会把 ``red_laser`` **自动降级为 gray**，
+      黑白相机走这条路径。
     """
-    if "gray" in item and item["gray"] is not None:
-        g = item["gray"]
-        # 若传入的已是灰度，转成 3 通道 BGR 以统一后续通道处理
-        if g.ndim == 2:
-            return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-        return g
-    path = item.get("image")
-    if path is None:
-        return None
-    img = read_image(path, must_exist=False)
+    img = _pick_image(item)
     if img is None:
         return None
-    return img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.ndim == 2:                       # 灰度 → 伪 BGR（单色相机）
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
 
 
 def _solve_chessboard_plane(gray: np.ndarray, objp: np.ndarray,
@@ -485,7 +511,24 @@ def _clip_centerline_to_board(pixels: np.ndarray, corners: np.ndarray,
 
 
 def _get_centerline(item: dict,
-                    gray: np.ndarray) -> Optional[np.ndarray]:
+                    image: np.ndarray,
+                    default_channel: str = "red_laser"
+                    ) -> Optional[np.ndarray]:
+    """从标定图提取激光中心线。
+
+    Parameters
+    ----------
+    item : 视角描述 dict；可含 ``centerline``（直接给定）、``method``、
+        ``threshold``、``smooth_sigma``、``steger_sigma``、``roi``、``channel``。
+    image : 原始图像（保留 BGR 时颜色差分可用）。
+    default_channel : 未显式指定 ``channel`` 时使用的提取通道。
+
+        - 彩色相机（默认）用 ``"red_laser"``（``R - max(G,B)``），可压制
+          棋盘格灰白背景与木框等环境光干扰；
+        - 黑白相机请设为 ``"gray"``。若图像本身是单通道，``preprocess``
+          会**自动降级**为 gray，因此即便这里给了 ``red_laser`` 也不会
+          报错，只是等价于 gray。
+    """
     if item.get("centerline") is not None:
         return np.asarray(item["centerline"], dtype=np.float64).reshape(-1, 2)
 
@@ -502,10 +545,11 @@ def _get_centerline(item: dict,
         "smooth_sigma": item.get("smooth_sigma", 1.5),
         "steger_sigma": item.get("steger_sigma", 1.5),
         "roi": item.get("roi", None),
-        # 红色激光默认用颜色差分通道，压制棋盘格/背景等灰白干扰
-        "channel": item.get("channel", "red_laser"),
+        # 通道随相机类型而定：彩色相机用颜色差分（压制棋盘格/背景），
+        # 黑白相机在 preprocess 内自动降级为 gray（见 centerline.preprocess）。
+        "channel": item.get("channel", default_channel),
     })
-    return extract_centerline(gray, cfg)
+    return extract_centerline(image, cfg)
 
 
 def _intersect_pixels_with_plane(pixels: np.ndarray, K: np.ndarray,

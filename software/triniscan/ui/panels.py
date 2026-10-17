@@ -22,6 +22,8 @@ _FIELD_CHOICES: dict[str, list] = {
     ],
     "scan.num_views": [180, 150, 120, 90, 60],
     "axis_calib.method": ["peak", "sphere", "depth"],
+    "extraction.channel": ["red_laser", "gray"],
+    "laser_calib.channel": ["red_laser", "gray"],
 }
 
 

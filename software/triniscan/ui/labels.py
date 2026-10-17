@@ -44,6 +44,8 @@ FIELD_LABELS: dict[str, str] = {
     "camera.width": "图像宽度",
     "camera.height": "图像高度",
     "camera.fourcc": "像素格式",
+    "camera.fourcc_mono": "黑白像素格式",
+    "camera.mono": "黑白相机",
     "camera.fps": "目标帧率",
     "camera.auto_exposure": "自动曝光",
     "camera.exposure": "曝光值",
@@ -61,8 +63,11 @@ FIELD_LABELS: dict[str, str] = {
     "turntable.timeout_s": "指令超时",
 
     # --- 扫描 ---
+    "scan.preset": "视角数预设",
+    "scan.preset": "720 或 1080 视角；启用后自动回算自洽的每视角转角",
     "scan.angle_step_deg": "每视角转角",
     "scan.num_views": "视角数",
+    "scan.steps_per_view": "每视角微步数",
     "scan.timeout_s": "单件测量时限",
 
     # --- 标定文件 ---
@@ -108,6 +113,7 @@ FIELD_LABELS: dict[str, str] = {
     "laser_calib.outlier_mm": "离群距离阈值",
     "laser_calib.save_images": "保存标定原图",
     "laser_calib.clip_margin_px": "中心线裁剪边距",
+    "laser_calib.channel": "激光标定提取通道",
 
     # --- 标定质量阈值 ---
     "quality.camera_rms_good": "相机 RMS 优秀",
@@ -134,6 +140,17 @@ FIELD_LABELS: dict[str, str] = {
     "extraction.min_points": "每视角最少点数",
     "extraction.invert": "暗线模式",
     "extraction.roi": "感兴趣区域",
+    "extraction.channel": "提取通道",
+    "extraction.enhance_enable": "启用条纹增强",
+    "extraction.enhance_threshold": "增强阈值",
+    "extraction.enhance_blur_ksize": "平滑核尺寸",
+    "extraction.enhance_window": "峰值窗口半宽",
+    "extraction.enhance_window_enable": "峰值窗口掩膜",
+    "extraction.enhance_double_threshold_enable": "双阈值平滑",
+    "extraction.enhance_scale_to_width": "按宽度缩放",
+    "extraction.enhance_min_peak": "最小峰值",
+    "extraction.channel": "中心线提取通道",
+    "laser_calib.channel": "激光标定提取通道",
 
     # --- 三维重建 ---
     "reconstruction.voxel_size": "体素尺寸",
@@ -167,6 +184,12 @@ FIELD_LABELS: dict[str, str] = {
     "reconstruction.turntable_band_below_m": "转盘面下方剔除厚度",
     "reconstruction.turntable_keep_upper_only": "仅保留盘面上方",
     "reconstruction.turntable_radius_m": "转盘半径限制",
+    "reconstruction.turntable_method": "转盘去除方法",
+    "reconstruction.turntable_height_m": "转盘面高度",
+    "reconstruction.cluster_filter": "连通域去噪",
+    "reconstruction.cluster_eps_m": "聚类半径(m)",
+    "reconstruction.cluster_min_points": "聚类最少点数",
+    "reconstruction.cluster_keep_top": "保留簇数",
 
     # --- 体积计算 ---
     "volume.method": "计算方法",
@@ -191,6 +214,8 @@ FIELD_HINTS: dict[str, str] = {
     "camera.index": "多摄像头时依次尝试 0、1、2",
     "camera.backend": "msmf 帧率高(推荐)；dshow 锁曝光稳但帧率低",
     "camera.fourcc": "MJPG 压缩省带宽、帧率高；YUY2 不压缩、帧率低",
+    "camera.fourcc_mono": "黑白相机首选（如 Y800/GREY），失败回退像素格式",
+    "camera.mono": "黑白（单色）相机时开启；提取通道自动降级为 gray",
     "camera.fps": "目标采集帧率，0 表示不限制",
     "camera.auto_exposure": "必须关闭，否则激光亮度会漂移",
     "camera.exposure": "依相机而定，需实测：过曝则调小",
@@ -203,8 +228,10 @@ FIELD_HINTS: dict[str, str] = {
     "turntable.gear_ratio": "机械减速比，须与实际机构一致",
     "turntable.settle_ms": "转台到位后等待稳定的时间",
 
+    "scan.preset": "720 或 1080 视角；启用后自动回算自洽的每视角转角",
     "scan.angle_step_deg": "每视角转过的角度，越小越密但越慢",
     "scan.num_views": "视角数，可选 180/150/120/90/60（转角自动=360/视角数）",
+    "scan.steps_per_view": "每个视角转台走过的微步数（33152 微步=整圈，改动会重算转角）",
 
     "camera_calib.pattern_cols": "棋盘格内角点数（列），如 9",
     "camera_calib.pattern_rows": "棋盘格内角点数（行），如 6",
@@ -235,6 +262,7 @@ FIELD_HINTS: dict[str, str] = {
     "laser_calib.view_reject_mm": "单视角残差中位数超此值则剔除该视角",
     "laser_calib.outlier_mm": "稳健拟合的离群点距离阈值",
     "laser_calib.save_images": "保存激光标定原图，便于复查中心线提取",
+    "laser_calib.channel": "red_laser=彩色相机用颜色差分（推荐）；gray=黑白相机",
     "laser_calib.clip_margin_px": "把中心线裁剪到棋盘格凸包内的额外边距；0=紧贴棋盘边界，可去除棋盘外的伪中心线点",
 
     "quality.camera_rms_good": "相机重投影 RMS 优秀线（px）",
@@ -246,6 +274,15 @@ FIELD_HINTS: dict[str, str] = {
 
     "extraction.steger_merge": "column=每列一个中心；normal=按法向归并（倾斜条纹）",
     "extraction.steger_min_sep_px": "normal 归并下两中心的最小间距（像素）",
+    "extraction.enhance_enable": "开启后先做阈值→平滑→阈值+峰值窗口掩膜，抑制镜面反光簇",
+    "extraction.enhance_threshold": "增强用亮度阈值，通常与提取阈值一致",
+    "extraction.enhance_blur_ksize": "邻域均值平滑核（奇数），越大越能压掉孤立反光斑",
+    "extraction.enhance_window": "只保留每行峰值左右该半宽内的像素，抑制远端反光",
+    "extraction.enhance_window_enable": "关闭则只做双阈值平滑、不做峰值窗口",
+    "extraction.enhance_double_threshold_enable": "关闭则跳过阈值→平滑→阈值，仅做窗口掩膜",
+    "extraction.enhance_scale_to_width": "按图像宽度自动缩放核尺寸，使 720p/1080p 效果一致",
+    "extraction.enhance_min_peak": "该行峰值低于此值则整行清零（滤除弱反光行）",
+    "extraction.channel": "red_laser=彩色相机用颜色差分（推荐）；gray=黑白相机",
 
     "reconstruction.global_align": "多视角全局对齐，替代顺序 ICP 消除累积误差",
     "reconstruction.pose_graph": "优先用位姿图优化（失败自动回退迭代配准）",
@@ -263,6 +300,12 @@ FIELD_HINTS: dict[str, str] = {
     "reconstruction.turntable_band_below_m": "盘面下方该厚度内的点一并剔除",
     "reconstruction.turntable_keep_upper_only": "直接只保留盘面上方的点",
     "reconstruction.turntable_radius_m": "仅剔除距转轴小于该半径的点；null 不限",
+    "reconstruction.turntable_method": "ransac=平面拟合；axis_height=轴基准高度（推荐，抗竖直面）",
+    "reconstruction.turntable_height_m": "轴基准法：转盘面沿轴高度(m)；null 时从点云自动估计",
+    "reconstruction.cluster_filter": "剔除反光簇/支架残片等密集小团，保留最大簇",
+    "reconstruction.cluster_eps_m": "DBSCAN 邻域半径，略大于平均点间距",
+    "reconstruction.cluster_min_points": "成为核心点的最少邻居数",
+    "reconstruction.cluster_keep_top": "保留点数最多的前 k 个簇",
 
     "laser.wavelength_nm": "激光波长，用于安全说明",
     "laser.power_mw": "激光功率，注意安全",

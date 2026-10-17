@@ -24,12 +24,20 @@ from typing import Optional
 import numpy as np
 
 from ..camera import Camera
-from ..turntable import Turntable
+from ..turntable import (
+    Turntable,
+    TurntableConfig,
+    apply_scan_plan,
+    resolve_scan_plan,
+)
 from ..extraction import extract_centerline
 from ..reconstruction import (
     ViewCloud,
     register_views,
     reconstruct_mesh,
+    estimate_table_height,
+    remove_small_clusters,
+    remove_turntable_axis_height,
     remove_turntable_surface,
     triangulate,
     filter_by_depth,
@@ -51,6 +59,15 @@ from ..common.logging_utils import get_logger
 log = get_logger(__name__)
 
 __all__ = ["ScanPipeline", "ScanResult"]
+
+
+def _table_supports_steps(table) -> bool:
+    """探测固件是否支持 ``STEPS`` 指令。
+
+    默认假定支持（现代固件均实现）；若握手/查询失败则回退按角度驱动。
+    这里采用保守策略：仅当明确探测到不支持时才回退。
+    """
+    return hasattr(table, "rotate_steps")
 
 
 def _dominant_band(along: np.ndarray,
@@ -235,17 +252,42 @@ class ScanPipeline:
     # 阶段 1：采集
     # ------------------------------------------------------------------
     def acquire(self) -> list[dict]:
-        """转-停-拍，采集各视角图像。"""
+        """转-停-拍，采集各视角图像。
+
+        角度计划
+        --------
+        按 ``scan.preset``（720/1080）或 ``scan.num_views`` 生成**整数步**
+        的角度计划（:func:`triniscan.turntable.plan_scan`），并把实际
+        每视角转角写回配置 ``scan.angle_step_deg``，保证"电机走的角"
+        与"拼接用的角"严格一致，避免角度累计漂移导致点云炸开。
+        """
         raw_dir = ensure_dir(self.cfg.resolve("output.raw_dir"))
-        step = float(self.cfg.get("scan.angle_step_deg", 2.0))
-        n = int(self.cfg.get("scan.num_views", 180))
+
+        # 生成自洽的扫描计划（整数步 + 回算角度）
+        table_cfg = TurntableConfig.from_config(self.cfg.raw["turntable"])
+        plan = resolve_scan_plan(self.cfg.raw["scan"], table_cfg)
+        apply_scan_plan(self.cfg, plan)
+        step = plan.angle_step_deg
+        n = plan.num_views
+        log.info("扫描计划: %d 视角, 每视角 %d 微步 = %.4f° "
+                 "(累计 %.3f°, 与 360° 差 %+.3f°)",
+                 n, plan.steps_per_step, step, plan.total_deg,
+                 plan.full_turn_error_deg)
 
         views = []
         with Camera(self.cfg.raw["camera"]) as cam, \
                 Turntable(self.cfg.raw["turntable"]) as table:
             table.home()
+            # 有 plan 时用整数步直接驱动，彻底避免固件角度换算误差；
+            # 固件不支持 STEPS 时回退到角度指令。
+            use_steps = _table_supports_steps(table)
+            if not use_steps:
+                log.warning("固件不支持 STEPS，回退按角度驱动（可能有量化误差）")
             for i in range(n):
-                table.rotate_deg(step)
+                if use_steps:
+                    table.rotate_steps(plan.steps_per_step)
+                else:
+                    table.rotate_deg(step)
                 path = os.path.join(raw_dir, f"view_{i:04d}.png")
                 image = cam.grab_and_save(path)
                 views.append({
@@ -254,7 +296,7 @@ class ScanPipeline:
                     "image": path,
                     "raw": image,
                 })
-                log.debug("采集 %d/%d (%.1f°)", i + 1, n, step * (i + 1))
+                log.debug("采集 %d/%d (%.3f°)", i + 1, n, step * (i + 1))
         log.info("采集完成: %d 视角", len(views))
         return views
 
@@ -331,14 +373,18 @@ class ScanPipeline:
         # --- 世界系物理边界过滤（半径 / 轴向）---
         pcd, bounds_info = self._filter_bounds(pcd)
 
+        # --- 连通域去噪（剔除反光簇/支架残片等密集小团）---
+        pcd, cluster_info = self._filter_clusters(pcd)
+
         # --- 去转盘表面 ---
         removal_info = {"applied": False, "removed": 0}
         if bool(self.cfg.get("reconstruction.remove_turntable", True)):
             pcd, removal_info = self._remove_turntable(pcd)
+        removal_info = dict(removal_info)
+        removal_info["cluster"] = cluster_info
 
         # --- 轴向裁剪（剔除背景/支架孤立环带）---
         pcd, axial_info = self._clip_axial_band(pcd)
-        removal_info = dict(removal_info)
         removal_info["axial"] = axial_info
 
         pc_dir = ensure_dir(self.cfg.resolve("output.pointcloud_dir"))
@@ -387,31 +433,94 @@ class ScanPipeline:
         new_pcd.points = o3d.utility.Vector3dVector(res.points)
         return new_pcd, info
 
+    def _filter_clusters(self, pcd):
+        """连通域去噪：剔除反光簇/支架残片等**密集小团**，返回 ``(pcd, info)``。
+
+        与边界过滤/统计离群不同，这里针对的是"在界内、且点与点紧邻"
+        的噪声团——它们邻居不少，统计离群抓不到；但它们在空间上形成
+        **小连通域**，物体是最大的那个簇。默认关闭
+        （``reconstruction.cluster_filter``），开启后按配置聚类。
+        """
+        import open3d as o3d
+
+        if not bool(self.cfg.get("reconstruction.cluster_filter", False)):
+            return pcd, {"applied": False, "removed": 0,
+                         "reason": "未启用"}
+        pts = np.asarray(pcd.points, dtype=np.float64)
+        res = remove_small_clusters(
+            pts,
+            eps=float(self.cfg.get("reconstruction.cluster_eps_m", 0.002)),
+            min_points=int(
+                self.cfg.get("reconstruction.cluster_min_points", 10)),
+            keep_top=int(self.cfg.get("reconstruction.cluster_keep_top", 1)),
+        )
+        info = {"applied": res.applied, "removed": res.num_removed,
+                "reason": res.reason}
+        if not res.applied or res.num_removed == 0:
+            return pcd, info
+        new_pcd = o3d.geometry.PointCloud()
+        new_pcd.points = o3d.utility.Vector3dVector(res.points)
+        return new_pcd, info
+
     def _remove_turntable(self, pcd):
-        """对世界系点云做转盘去除（几何拟合），返回 ``(pcd, info)``。"""
+        """对世界系点云做转盘去除，返回 ``(pcd, info)``。
+
+        两种方法（``reconstruction.turntable_method``）：
+
+        - ``"axis_height"``：**轴基准高度法**（推荐）。直接用轴标定给出
+          的 ``h_table`` 切割，不依赖点云中的平面结构，对"物体有竖直面"
+          更稳健。``h_table`` 未配置时由 :func:`estimate_table_height`
+          从点云自动估计。
+        - ``"ransac"``：RANSAC 拟合主平面 + 法向校验（旧行为，默认）。
+        """
         import open3d as o3d
 
         pts = np.asarray(pcd.points, dtype=np.float64)
+        method = str(self.cfg.get("reconstruction.turntable_method",
+                                  "ransac")).lower()
         radius = self.cfg.get("reconstruction.turntable_radius_m", None)
-        res = remove_turntable_surface(
-            pts,
-            axis_dir=self._axis_calib.direction,
-            axis_point=self._axis_calib.point,
-            ransac_dist=float(
-                self.cfg.get("reconstruction.turntable_plane_tol_m", 0.001)),
-            min_inlier_ratio=float(
-                self.cfg.get("reconstruction.turntable_min_inlier", 0.15)),
-            align_tol_deg=float(
-                self.cfg.get("reconstruction.turntable_align_tol_deg", 15.0)),
-            margin=float(
-                self.cfg.get("reconstruction.turntable_margin_m", 0.0005)),
-            band_below=float(
-                self.cfg.get("reconstruction.turntable_band_below_m", 0.0015)),
-            keep_upper_only=bool(
-                self.cfg.get("reconstruction.turntable_keep_upper_only",
-                             True)),
-            radius=(float(radius) if radius else None),
-        )
+        margin = float(
+            self.cfg.get("reconstruction.turntable_margin_m", 0.0005))
+
+        if method == "axis_height":
+            h_table = self.cfg.get("reconstruction.turntable_height_m", None)
+            if h_table is None:
+                h_table = estimate_table_height(
+                    pts, self._axis_calib.point, self._axis_calib.direction)
+            if h_table is None:
+                info = {"applied": False, "removed": 0,
+                        "reason": "无法估计 h_table，跳过"}
+                return pcd, info
+            res = remove_turntable_axis_height(
+                pts, self._axis_calib.point, self._axis_calib.direction,
+                float(h_table),
+                margin=margin,
+                band_below=float(self.cfg.get(
+                    "reconstruction.turntable_band_below_m", 0.002)),
+                radius=(float(radius) if radius else None),
+            )
+        else:
+            res = remove_turntable_surface(
+                pts,
+                axis_dir=self._axis_calib.direction,
+                axis_point=self._axis_calib.point,
+                ransac_dist=float(
+                    self.cfg.get("reconstruction.turntable_plane_tol_m",
+                                 0.001)),
+                min_inlier_ratio=float(
+                    self.cfg.get("reconstruction.turntable_min_inlier", 0.15)),
+                align_tol_deg=float(
+                    self.cfg.get("reconstruction.turntable_align_tol_deg",
+                                 15.0)),
+                margin=margin,
+                band_below=float(
+                    self.cfg.get("reconstruction.turntable_band_below_m",
+                                 0.0015)),
+                keep_upper_only=bool(
+                    self.cfg.get("reconstruction.turntable_keep_upper_only",
+                                 True)),
+                radius=(float(radius) if radius else None),
+            )
         info = {
             "applied": res.applied, "removed": res.num_removed,
             "reason": res.reason,

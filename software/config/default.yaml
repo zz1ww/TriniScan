@@ -4,6 +4,8 @@ camera:
   width: 1920
   height: 1080
   fourcc: MJPG
+  fourcc_mono: Y800
+  mono: false
   fps: 30
   auto_exposure: false
   exposure: -6
@@ -16,12 +18,14 @@ turntable:
   steps_per_rev: 200
   microstep: 32
   gear_ratio: 5.18
-  settle_ms: 2000
+  settle_ms: 370
   timeout_s: 5.0
 scan:
-  angle_step_deg: 1.0
+  preset: null
+  angle_step_deg: 0.9990347490347491
   num_views: 360
   timeout_s: 120
+  steps_per_view: 92
 calibration:
   camera_file: software/config/calib_camera.npz
   laser_file: software/config/calib_laser.npz
@@ -46,10 +50,6 @@ camera_calib:
   min_images_for_pruning: 8
 axis_calib:
   sphere_radius_m: 0.02
-  # depth  = 球心高度约束反解（推荐：亮背景黑球，只用球心像素，抗半径抖动）
-  #          开灯即可，最稳；球心在图像中画圆即可标定。
-  # sphere = 黑球圆法（依赖像素半径，半径抖动会放大深度误差）
-  # peak   = 激光亮点法（需激光打中球；线激光只有少数角度打中，慎用）
   method: depth
   save_images: true
   num_views: 24
@@ -72,6 +72,10 @@ laser_calib:
   outlier_mm: 0.5
   save_images: true
   clip_margin_px: 0.0
+  # 激光平面标定的中心线提取通道（与 extraction.channel 同义）：
+  #   red_laser —— 彩色相机（推荐，压制棋盘格灰白背景干扰）
+  #   gray      —— 黑白相机
+  channel: red_laser
 laser:
   wavelength_nm: 650
   power_mw: 1.0
@@ -95,6 +99,18 @@ extraction:
   min_points: 50
   invert: false
   roi: null
+  # 中心线提取通道：
+  #   red_laser —— 彩色相机（R - max(G,B)，压制棋盘格/木框等环境光干扰）
+  #   gray      —— 黑白相机（单通道图像会自动降级为 gray）
+  channel: red_laser
+  enhance_enable: true
+  enhance_threshold: 60.0
+  enhance_blur_ksize: 5
+  enhance_window: 9
+  enhance_window_enable: true
+  enhance_double_threshold_enable: true
+  enhance_scale_to_width: true
+  enhance_min_peak: 0.0
 reconstruction:
   voxel_size: 0.0005
   icp_refine: false
@@ -106,6 +122,10 @@ reconstruction:
   depth_min_m: 0.0
   depth_max_m: 0.3
   bounds_radius_m: 0.0
+  cluster_filter: true
+  cluster_eps_m: 0.002
+  cluster_min_points: 10
+  cluster_keep_top: 1
   bounds_z_min_m: null
   bounds_z_max_m: null
   poisson_depth: 9
@@ -115,6 +135,8 @@ reconstruction:
   close_fallback: bottom_plane
   allow_convex_hull: true
   remove_turntable: true
+  turntable_method: axis_height
+  turntable_height_m: null
   turntable_plane_tol_m: 0.001
   turntable_min_inlier: 0.15
   turntable_align_tol_deg: 15.0
@@ -122,9 +144,6 @@ reconstruction:
   turntable_band_below_m: 0.0015
   turntable_keep_upper_only: true
   turntable_radius_m: null
-  # 轴向裁剪：剔除物体后方背景/支架形成的孤立环带（按沿轴高度分离）
-  #   auto_trim=true 会自动取"物体主体高度区间"，物体高度未知时最省心；
-  #   也可用 height_min_m/height_max_m 显式给出硬门限（更可控）。
   axial:
     auto_trim: true
     height_min_m: null

@@ -20,6 +20,20 @@
 4. 可选：仅剔除距转轴半径 < ``radius`` 的点（转盘边缘外不误伤）。
 
 本模块为纯几何、可配置、可单测，并返回可解释的去除信息。
+
+两种方法
+--------
+1. :func:`remove_turntable_surface`（``method="ransac"``）：RANSAC 拟合
+   主平面 + 法向与轴平行校验。**对平面占比高的场景有效**，但物体的
+   大面积竖直面会干扰平面选择。
+2. :func:`remove_turntable_axis_height`（``method="axis_height"`）：
+   直接以**轴标定给出的轴向基准** ``h_table`` 切割——因为转轴已经标定，
+   转盘面的高度是标定体系的固有量，无需从点云反推。**更稳、更可控**。
+   Cyclop/Horus 的坐标系就是把 Z=0 定义在转台面上（见
+   ``Jesus89/3DScanScience`` 第 6 节），本方法即该约定的工程化实现。
+
+:func:`estimate_table_height` 可在未显式给出 ``h_table`` 时，从点云的
+``(r, h)`` 极坐标分布中自动估计（找"轴向最低且径向延伸最宽"的密集层）。
 """
 from __future__ import annotations
 
@@ -33,7 +47,8 @@ from ..common.robust import robust_plane_fit
 
 log = get_logger(__name__)
 
-__all__ = ["TurntableRemovalResult", "remove_turntable_surface"]
+__all__ = ["TurntableRemovalResult", "remove_turntable_surface",
+           "estimate_table_height", "remove_turntable_axis_height"]
 
 
 @dataclass
@@ -171,4 +186,164 @@ def remove_turntable_surface(
     )
     log.info("转盘去除: %s（主平面内点占比 %.0f%%）",
              result.reason, inlier_ratio * 100)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 方法 2：轴基准高度法（Cyclop 坐标约定）
+# ---------------------------------------------------------------------------
+def _axis_frame(points: np.ndarray, axis_point: np.ndarray,
+                axis_dir: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """把点云投影到轴坐标系，返回 ``(h, r)``。
+
+    ``h`` 为沿轴坐标（相对 ``axis_point``），``r`` 为到轴的径向距离。
+    """
+    axis = np.asarray(axis_dir, dtype=np.float64).reshape(3)
+    nrm = np.linalg.norm(axis)
+    axis = axis / nrm if nrm > 1e-12 else np.array([0.0, 0.0, 1.0])
+    origin = np.asarray(axis_point, dtype=np.float64).reshape(3)
+    rel = points - origin
+    h = rel @ axis
+    perp = rel - np.outer(h, axis)
+    r = np.linalg.norm(perp, axis=1)
+    return h, r
+
+
+def estimate_table_height(points: np.ndarray,
+                          axis_point: np.ndarray,
+                          axis_dir: np.ndarray,
+                          *,
+                          bins: int = 100,
+                          width_ratio: float = 0.5,
+                          min_count: int = 20) -> Optional[float]:
+    """从点云自动估计**转盘面**的轴向高度 ``h_table``。
+
+    判据
+    ----
+    转盘面在点云中的特征：**位于物体下方（h 最小侧）**，且**径向延伸
+    最宽**（盘面半径大于物体截面）。因此：
+
+    1. 按 ``h`` 分箱，统计每箱的点数；
+    2. 只考虑 h 较小的那部分（``width_ratio`` 比例，默认下半）；
+    3. 在点数达到 ``min_count`` 的候选中，取 **h 最小** 的一箱作为盘面
+       （转盘面在物体下方，是最底的密集层）。
+
+    Parameters
+    ----------
+    points : (N, 3) 世界系点云
+    axis_point, axis_dir : 轴
+    bins : 轴向分箱数
+    width_ratio : 只在 h 分布的下侧该比例内搜索（转盘在下方）
+    min_count : 视为"密集层"的最少点数
+
+    Returns
+    -------
+    float 或 None : 估计的 ``h_table``（与轴同单位，通常 m）
+    """
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(points) < max(min_count * 2, 50):
+        return None
+    h, _ = _axis_frame(points, axis_point, axis_dir)
+    if h.size == 0 or np.ptp(h) < 1e-9:
+        return None
+
+    lo_all, hi_all = float(h.min()), float(h.max())
+    span = hi_all - lo_all
+    # 只在下侧 width_ratio 区间内搜索（转盘位于物体下方）
+    hi_search = lo_all + span * float(np.clip(width_ratio, 0.05, 1.0))
+    sel = h[(h >= lo_all) & (h <= hi_search)]
+    if sel.size < min_count:
+        sel = h
+    edges = np.linspace(float(sel.min()), float(sel.max()),
+                        max(bins, 4) + 1)
+    counts, edges = np.histogram(sel, bins=edges)
+    valid = np.nonzero(counts >= int(min_count))[0]
+    if valid.size == 0:
+        # 放宽到至少取最大箱
+        valid = np.array([int(np.argmax(counts))])
+    k = int(valid[0])                       # h 最小的密集箱
+    h_table = float(0.5 * (edges[k] + edges[k + 1]))
+    log.info("自动估计转盘高度 h_table=%.2f mm（密集箱点数 %d）",
+             h_table * 1e3, int(counts[k]))
+    return h_table
+
+
+def remove_turntable_axis_height(
+    points: np.ndarray,
+    axis_point: np.ndarray,
+    axis_dir: np.ndarray,
+    h_table: float,
+    *,
+    margin: float = 0.0005,
+    band_below: float = 0.002,
+    radius: Optional[float] = None,
+    clamp_to_cloud_min: bool = True,
+) -> TurntableRemovalResult:
+    """按**轴基准高度** ``h_table`` 剔除转盘面点（Cyclop 坐标约定）。
+
+    与 RANSAC 平面法相比，本方法**不依赖点云中的平面结构**：只要转轴
+    已标定，转盘面的高度就是标定体系的固有量，直接把 ``h <= h_table +
+    margin`` 的点剔除即可。这对"物体有大面积竖直面"（会干扰 RANSAC
+    选面）的场景尤其稳健。
+
+    Parameters
+    ----------
+    points : (N, 3) 世界系点云
+    axis_point, axis_dir : 轴
+    h_table : 转盘面沿轴高度（同轴坐标系单位）
+    margin : 盘面**上方**仍视为盘面的厚度 (m)
+    band_below : 盘面**下方**剔除的厚度 (m)
+    radius : 仅剔除距轴半径 <= 此值的点（m）；None 不限。
+        用于避免误删转盘半径之外的物体/背景。
+    clamp_to_cloud_min : 若 ``h_table`` 低于点云最小 h，说明标定基准
+        与本次点云不吻合，此时把它抬到点云最小 h（安全兜底），
+        并在结果 reason 中说明。
+
+    Returns
+    -------
+    TurntableRemovalResult
+    """
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    n = len(points)
+    if n < 10:
+        return TurntableRemovalResult(
+            points=points, removed_mask=np.zeros(n, dtype=bool),
+            plane=None, num_input=n, applied=False,
+            reason="点数过少，跳过转盘去除")
+
+    h, r = _axis_frame(points, axis_point, axis_dir)
+    h_tab = float(h_table)
+    note = ""
+    if clamp_to_cloud_min:
+        h_min = float(h.min())
+        if h_tab < h_min:
+            note = (f"（h_table {h_tab*1e3:.1f}mm 低于点云最低 "
+                    f"{h_min*1e3:.1f}mm，已抬升至点云最低）")
+            h_tab = h_min
+
+    margin = max(float(margin), 0.0)
+    band_below = max(float(band_below), 0.0)
+    # 剔除：h <= h_table + margin（盘面及其下方 band_below 内）
+    cut_hi = h_tab + margin
+    below = h_tab - margin - band_below
+    remove = (h <= cut_hi) & (h >= below)
+
+    if radius is not None and float(radius) > 0:
+        remove &= (r <= float(radius))
+
+    removed = int(remove.sum())
+    if removed == 0:
+        return TurntableRemovalResult(
+            points=points, removed_mask=np.zeros(n, dtype=bool),
+            plane=None, num_input=n, applied=False,
+            reason=f"轴基准 {h_tab*1e3:.1f}mm 处无点可剔除{note}")
+
+    kept = points[~remove]
+    result = TurntableRemovalResult(
+        points=kept, removed_mask=remove, plane=None,
+        num_input=n, num_removed=removed, applied=True,
+        reason=(f"轴基准法 h_table={h_tab*1e3:.1f}mm：剔除 {removed} 点"
+                f"（{removed / n * 100:.1f}%）{note}"),
+    )
+    log.info("转盘去除[轴基准]: %s", result.reason)
     return result
