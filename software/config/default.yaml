@@ -1,15 +1,15 @@
 camera:
   index: 1
-  backend: msmf
-  width: 1920
-  height: 1080
+  backend: dshow
+  width: 1280
+  height: 800
   fourcc: MJPG
   fourcc_mono: Y800
-  mono: false
-  fps: 30
+  mono: true
+  fps: 10
   auto_exposure: false
-  exposure: -6
-  gain: 0
+  exposure: -8
+  gain: 100
   auto_wb: false
   discard_frames: 3
 turntable:
@@ -18,11 +18,11 @@ turntable:
   steps_per_rev: 200
   microstep: 32
   gear_ratio: 5.18
-  settle_ms: 370
+  settle_ms: 1000
   timeout_s: 5.0
 scan:
   preset: null
-  angle_step_deg: 0.9990347490347491
+  angle_step_deg: 1.0
   num_views: 360
   timeout_s: 120
   steps_per_view: 92
@@ -72,10 +72,7 @@ laser_calib:
   outlier_mm: 0.5
   save_images: true
   clip_margin_px: 0.0
-  # 激光平面标定的中心线提取通道（与 extraction.channel 同义）：
-  #   red_laser —— 彩色相机（推荐，压制棋盘格灰白背景干扰）
-  #   gray      —— 黑白相机
-  channel: red_laser
+  channel: gray
 laser:
   wavelength_nm: 650
   power_mw: 1.0
@@ -99,9 +96,6 @@ extraction:
   min_points: 50
   invert: false
   roi: null
-  # 中心线提取通道：
-  #   red_laser —— 彩色相机（R - max(G,B)，压制棋盘格/木框等环境光干扰）
-  #   gray      —— 黑白相机（单通道图像会自动降级为 gray）
   channel: red_laser
   enhance_enable: true
   enhance_threshold: 60.0
@@ -112,18 +106,15 @@ extraction:
   enhance_scale_to_width: true
   enhance_min_peak: 0.0
 reconstruction:
-  # 过滤链：按顺序执行，每层产出"保留掩膜"并汇总到报告。
-  # 删除上面 config，启用下面这一段即可显式控制顺序与逐项参数。
-  # 不写 filter_chain 时，自动回退到旧式扁平键（depth_filter /
-  # bounds_radius_m / cluster_filter / remove_turntable / axial.*）。
   filter_chain:
-    - {name: depth}
-    - {name: bounds, enable: false}    # bounds_radius_m=0 时本就等于不启用
-    - {name: cluster}
-    - {name: turntable, method: axis_height}
-    - {name: axial, auto_trim: true}
-    # 统计离群默认关闭：线结构光点云密度不均，开启容易成片误删真实表面
-    # - {name: statistical, nb_neighbors: 20, std_ratio: 2.0}
+  - name: depth
+  - name: bounds
+    enable: false
+  - name: cluster
+  - name: turntable
+    method: axis_height
+  - name: axial
+    auto_trim: true
   voxel_size: 0.0005
   icp_refine: false
   global_align: false

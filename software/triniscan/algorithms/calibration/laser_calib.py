@@ -449,15 +449,17 @@ def _solve_chessboard_plane(gray: np.ndarray, objp: np.ndarray,
         ``plane`` 为 (4,) 平面方程；``corners`` 为 (N,2) 亚像素角点像素
         （用于把激光中心线裁剪到棋盘格范围内）。
     """
-    flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
-    found, corners = cv2.findChessboardCorners(gray, pattern_size, flags)
-    if not found:
+    # 复用相机标定里的角点检测器：优先 SB（sector-based）检测器，
+    # 它对光照不均、轻微模糊、低对比度远优于经典 findChessboardCorners。
+    # 本项目实测：13 张激光标定图里经典检测器只检出 8 张，SB 检出 13 张；
+    # 漏检的那几张恰恰是残差最大的视角，被丢弃后剩余视角残差反而变大
+    # （表现为"剔除劣质视角后有效视角不足"）。
+    from .camera_calib import _detect_corners
+
+    corners = _detect_corners(gray, pattern_size, use_sb=True)
+    if corners is None:
         return None
 
-    corners = cv2.cornerSubPix(
-        gray, corners, (11, 11), (-1, -1),
-        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
-    )
     ok, rvec, tvec = cv2.solvePnP(
         objp, corners, K,
         dist if dist is not None else np.zeros(5),
