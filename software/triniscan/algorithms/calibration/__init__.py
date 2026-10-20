@@ -26,6 +26,15 @@ from .axis_calib import (
     save_axis_calib,
     transform_about_axis,
 )
+from .axis_chessboard import (
+    BoardPose,
+    ChessboardAxisCollector,
+    axis_points_from_poses,
+    board_reference_point,
+    calibrate_axis_from_chessboards,
+    direction_sign_from_poses,
+    solve_board_pose,
+)
 from .axis_live import (
     AxisLiveCollector,
     RegionOfInterest,
@@ -34,6 +43,7 @@ from .axis_live import (
     detect_spot_peak,
     sphere_center_from_pixel,
 )
+from .specs import board_pattern
 from .quality import (
     DEFAULT_THRESHOLDS,
     QualityLevel,
@@ -56,6 +66,9 @@ __all__ = [
     "AxisCalibResult", "calibrate_axis",
     "load_axis_calib", "save_axis_calib",
     "transform_about_axis",
+    "BoardPose", "ChessboardAxisCollector", "calibrate_axis_from_chessboards",
+    "axis_points_from_poses", "board_reference_point",
+    "direction_sign_from_poses", "solve_board_pose", "board_pattern",
     "AxisLiveCollector", "RegionOfInterest", "SpotNotFound",
     "detect_spot_peak", "detect_sphere_center",
     "sphere_center_from_pixel",

@@ -13,11 +13,14 @@ from __future__ import annotations
 from triniscan.contracts import AlgorithmSpec, CALIBRATORS, ParamSpec
 
 from .axis_calib import calibrate_axis, load_axis_calib
+from .axis_chessboard import calibrate_axis_from_chessboards
 from .camera_calib import calibrate_camera, load_camera_calib
 from .laser_calib import calibrate_laser_plane, load_laser_calib
 
-__all__ = ["CAMERA_CALIB_SPEC", "LASER_CALIB_SPEC", "AXIS_CALIB_SPEC",
-           "QUALITY_SPEC", "specs"]
+__all__ = [
+    "CAMERA_CALIB_SPEC", "LASER_CALIB_SPEC", "AXIS_CALIB_SPEC",
+    "QUALITY_SPEC", "specs", "board_pattern",
+]
 
 
 CAMERA_CALIB_SPEC = AlgorithmSpec(
@@ -66,14 +69,18 @@ LASER_CALIB_SPEC = AlgorithmSpec(
 AXIS_CALIB_SPEC = AlgorithmSpec(
     name="axis",
     label="转轴标定",
-    func=calibrate_axis,
-    help="标准球绕转轴的多个视角球心 → 拟合圆周 → 轴点与轴向",
+    func=calibrate_axis_from_chessboards,
+    help=("标记物绕转轴的多个视角 → 拟合圆周 → 轴点与轴向；"
+          "chessboard=棋盘格板（无需激光/标记球）"),
     tags=("标定", "离线"),
     params=(
         ParamSpec("axis_calib.method", str, "depth",
-                  choices=("depth", "sphere"), short="method",
+                  choices=("depth", "sphere", "chessboard"), short="method",
                   label="标定方法",
-                  help="depth=仅用激光深度（快）；sphere=球心拟合"),
+                  help=("depth=仅用激光深度（快）；sphere=球心拟合；"
+                        "chessboard=棋盘格板随转台旋转，仅需相机内参。"
+                        "chessboard 不要求激光平面标定，也不要求标记球，"
+                        "手动拍照时按同一方向依次拍即可（无需记录转角）")),
         ParamSpec("axis_calib.num_views", int, 24, low=6, high=72,
                   short="num_views", label="标定视角数"),
         ParamSpec("axis_calib.step_deg", float, 30.0, low=1.0, high=120.0,
@@ -84,6 +91,22 @@ AXIS_CALIB_SPEC = AlgorithmSpec(
                   help="超过视为标定不合格"),
         ParamSpec("axis_calib.robust", bool, True, short="robust",
                   label="稳健拟合"),
+        ParamSpec("axis_calib.chessboard_orientation", str, "landscape",
+              choices=("landscape", "portrait"),
+              label="棋盘朝向（长边水平/竖直）",
+              help=(
+                  "棋盘格法必需。矩形棋盘横放和竖放解出来的轴半径相差很大"
+                  "（合成验证：真实 60 mm，选错会得到 76 mm），而且两种解"
+                  "各自都能拼出完美的圆，程序无法自己判断。所以必须告诉它"
+                  "棋盘是怎么摆的：landscape = 长边水平（11 个角点一行），"
+                  "portrait = 长边竖直。这个值对每台设备固定，配一次即可。")),
+    ParamSpec("axis_calib.chessboard_use_center", bool, True,
+                  short="chessboard_use_center",
+                  label="棋盘取板中心",
+                  help=("chessboard 法追踪的板上固定点：开=角点网格中心"
+                        "（推荐，离板边最远）；关=网格左上角点。"
+                        "棋盘内角数与方格边长复用「相机内参标定」的配置项，"
+                        "不在此重复声明")),
     ),
 )
 
@@ -147,3 +170,33 @@ def quality_thresholds(cfg) -> dict:
         if pair:
             out[family] = pair
     return out
+
+
+def axis_chessboard_orientation(cfg, default: str = "landscape") -> str:
+    """读棋盘安装朝向（``landscape`` / ``portrait``）。
+
+    与棋盘尺寸一起由 :func:`board_pattern` 返回，统一出处，避免 UI 与
+    算法两侧各读一遍配置导致不一致。
+    """
+    try:
+        val = cfg.get("axis_calib.chessboard_orientation", default)
+    except AttributeError:
+        val = default
+    val = str(val or default).lower()
+    return val if val in ("landscape", "portrait") else "landscape"
+
+
+def board_pattern(cfg, default_cols: int = 11, default_rows: int = 8,
+                  default_square_m: float = 0.010) -> tuple[int, int, float]:
+    """读出棋盘格三件套（内角列数、行数、方格边长）。
+
+    **单一来源**：直接复用「相机内参标定」的配置项
+    ``camera_calib.pattern_cols / pattern_rows / square_size_m``。
+    棋盘法转轴标定与相机内参用的是同一块板子，重复声明只会导致
+    "改了相机标定却忘了转轴"。
+    """
+    return (
+        int(cfg.get("camera_calib.pattern_cols", default_cols)),
+        int(cfg.get("camera_calib.pattern_rows", default_rows)),
+        float(cfg.get("camera_calib.square_size_m", default_square_m)),
+    )

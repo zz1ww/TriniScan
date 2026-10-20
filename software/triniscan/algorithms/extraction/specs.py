@@ -49,7 +49,7 @@ EXTRACT_SPEC = AlgorithmSpec(
         ParamSpec("extraction.invert", bool, False, short="invert",
                   label="亮暗反转",
                   help="亮背景暗激光时开启"),
-        ParamSpec("extraction.channel", str, "red_laser",
+        ParamSpec("extraction.channel", str, "gray",
                   choices=("red_laser", "gray"), short="channel",
                   label="颜色通道",
                   help="red_laser=彩色相机用颜色差分；gray=黑白相机"),

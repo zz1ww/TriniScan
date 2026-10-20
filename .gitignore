@@ -70,3 +70,13 @@ Listings/
 
 # ---- 临时调试脚本与中间产物（data 根目录下的 _ 前缀文件）----
 data/_*
+
+# ---- 实验台产物（只入库源码；输出图体积大）----
+lab/outputs/
+lab/_debug/
+
+# ---- 根目录调试截图 ----
+/_probe_*.png
+
+# ---- 标定文件备份（*.bak 规则不匹配 xx.npz.bak.0.43mm 这类后缀）----
+software/config/*.npz.bak*

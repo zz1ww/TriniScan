@@ -3,29 +3,37 @@ camera:
   backend: dshow
   width: 1280
   height: 800
+  # MJPG 是唯一能突破 USB2.0 带宽的方案：1280x800 未压缩 YUY2 只有
+  # 10 fps，MJPG 实测 69 fps。四码必须在分辨率之后设置才生效。
   fourcc: MJPG
-  fourcc_mono: Y800
+  # 通用 UVC 相机不支持 Y800（DirectShow 工业相机格式），留空避免无效尝试。
+  fourcc_mono: ""
   mono: true
-  fps: 10
+  fps: 60
   auto_exposure: false
   exposure: -8
   gain: 100
   auto_wb: false
-  discard_frames: 3
+  # 正式抓图前丢弃的帧数。MJPG 69fps 下每帧 14.5ms，1 帧足够；
+  # 过大会让每张图多等 N × 14.5ms。驱动侧缓冲已由 BUFFERSIZE=1 限制。
+  discard_frames: 1
 turntable:
   port: COM9
   baudrate: 115200
   steps_per_rev: 200
   microstep: 32
   gear_ratio: 5.18
-  settle_ms: 1000
+  # 每步脉冲间隔（微秒），必须与固件 config.h 的 DEFAULT_STEP_US 一致。
+  # 上位机用它估算运动时长，判断 settle_ms 是否够（见 Turntable.wait_idle）。
+  step_us: 900
+  settle_ms: 30
   timeout_s: 5.0
 scan:
-  preset: null
-  angle_step_deg: 1.0
-  num_views: 360
+  preset: 720
+  angle_step_deg: 0.49951737451737455
+  num_views: 720
   timeout_s: 120
-  steps_per_view: 92
+  steps_per_view: 46
 calibration:
   camera_file: software/config/calib_camera.npz
   laser_file: software/config/calib_laser.npz
@@ -96,7 +104,7 @@ extraction:
   min_points: 50
   invert: false
   roi: null
-  channel: red_laser
+  channel: gray
   enhance_enable: true
   enhance_threshold: 60.0
   enhance_blur_ksize: 5

@@ -53,10 +53,14 @@ def test_choice_matches_algorithm_declaration():
 
 
 def test_axis_method_has_no_illegal_peak_only():
-    """回归锁：标定页曾硬编码 peak，而声明里只有 depth/sphere。"""
+    """回归锁：标定页曾硬编码 peak，而声明里没有它。
+
+    声明新增了 chessboard（棋盘格法）后，这里只锁"不含 peak"这件事，
+    避免每次加方法都要改测试。
+    """
     got = al.choices_for_key("axis_calib.method")
     assert got is not None
-    assert set(got) == {"depth", "sphere"}
+    assert set(got) == {"depth", "sphere", "chessboard"}
     assert "peak" not in got
 
 
@@ -198,3 +202,82 @@ def test_field_table_offers_algorithm_choices(root):
                           "gray_centroid", "parabola", "peak"]
     widget = table._widgets["extraction.method"]
     assert str(widget.winfo_class()) == "TCombobox"
+
+
+# ---------------------------------------------------------------------------
+# 结构型配置（dict / list）：不得被文本化
+#
+# 回归背景：``reconstruction.axial`` 是 dict、``reconstruction.filter_chain``
+# 是 list，旧版 ``FieldTable`` 把它们渲染成单行 Entry（内容为完整 repr）。
+# 用户点一下再失焦即触发 ``_commit`` → ``coerce`` 转成 str 写回 store，
+# 于是 ``AxialTrimFilter.read_params`` 读不到子键，``auto_trim`` 从 True
+# 静默变成 False——没有任何报错。这组测试锁住该行为。
+# ---------------------------------------------------------------------------
+STRUCTURAL_KEYS = ("reconstruction.filter_chain", "reconstruction.axial",
+                   "calibration.z_axis_point", "calibration.z_axis_dir")
+
+
+def test_structural_fields_are_recognized():
+    fields = all_fields(_cfg())
+    for key in STRUCTURAL_KEYS:
+        assert key in fields, key
+        assert fields[key].is_structural, f"{key} 应判定为结构型"
+    assert fields["reconstruction.axial"].kind == "dict"
+    assert fields["reconstruction.filter_chain"].kind == "list"
+
+
+def test_structural_fields_reject_text():
+    """把字符串喂给结构型配置应校验失败（提示改用专用编辑器）。"""
+    fields = all_fields(_cfg())
+    for key in STRUCTURAL_KEYS:
+        fs = fields[key]
+        assert fs.validate("{'auto_trim': True}"), key
+        assert fs.validate("[1, 2]"), key
+
+
+def test_structural_to_text_is_summary_not_repr():
+    """显示文本只是类型摘要，不能包含完整结构（避免诱导用户编辑）。"""
+    cfg = _cfg()
+    fields = all_fields(cfg)
+    text = fields["reconstruction.axial"].to_text(
+        cfg.get("reconstruction.axial"))
+    assert "auto_trim" not in text
+    assert "dict" in text
+
+
+def test_coerce_structural_is_identity():
+    """coerce 对结构型必须原样返回（不做任何文本转换）。"""
+    cfg = _cfg()
+    fields = all_fields(cfg)
+    for key in STRUCTURAL_KEYS:
+        value = cfg.get(key)
+        assert fields[key].coerce(value) is value, key
+
+
+def test_field_table_uses_label_for_structural(root):
+    """结构型字段在界面上必须是只读 Label，不是 Entry/Combobox。"""
+    from triniscan.ui.panels import FieldTable
+
+    table = FieldTable(root, _cfg())
+    root.update_idletasks()
+    for key in STRUCTURAL_KEYS:
+        cls = str(table._widgets[key].winfo_class())
+        assert cls == "TLabel", f"{key} 用了 {cls}，应只读显示"
+
+
+def test_field_table_never_commits_structural(root):
+    """即使外部误触发 _commit，也不能改动结构型配置。"""
+    from triniscan.ui.panels import FieldTable
+
+    cfg = _cfg()
+    before = {k: cfg.get(k) for k in STRUCTURAL_KEYS}
+    got = []
+    table = FieldTable(root, cfg, on_change=lambda k, v: got.append((k, v)))
+    root.update_idletasks()
+
+    for key in STRUCTURAL_KEYS:
+        table._commit(key)
+
+    assert got == [], "结构型配置不应触发提交回调"
+    for key in STRUCTURAL_KEYS:
+        assert cfg.get(key) == before[key], key

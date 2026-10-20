@@ -187,8 +187,17 @@ class FieldTable(ttk.Frame):
         current = self._cfg.get(fs.key)
         var = tk.StringVar(value=fs.to_text(current))
 
-        if fs.choices:
-            widget: ttk.Widget = ttk.Combobox(
+        if fs.is_structural:
+            # 结构型配置（dict / list）**不提供文本控件**：任何单行
+            # 文本表达都会在失焦时把结构覆盖成字符串，导致下游插件
+            # 静默退回默认值（例：reconstruction.axial 被点一下就把
+            # auto_trim 从 True 变成 False）。界面只读显示类型摘要，
+            # 修改交给专用编辑器（子面板 / 过滤链编辑器）。
+            widget: ttk.Widget = ttk.Label(
+                parent, text=fs.to_text(current),
+                foreground="#7f8c8d")
+        elif fs.choices:
+            widget = ttk.Combobox(
                 parent, textvariable=var, width=16, state="readonly",
                 values=[str(c) for c in fs.choices])
         elif fs.kind == "bool":
@@ -198,11 +207,13 @@ class FieldTable(ttk.Frame):
             widget = ttk.Entry(parent, textvariable=var, width=18)
 
         widget.grid(row=row, column=1, sticky="w", padx=(0, 8), pady=1)
-        widget.bind("<FocusOut>", lambda _e, k=fs.key: self._commit(k))
-        widget.bind("<Return>", lambda _e, k=fs.key: self._commit(k))
-        if fs.choices or fs.kind == "bool":
-            widget.bind("<<ComboboxSelected>>",
+        if not fs.is_structural:
+            widget.bind("<FocusOut>",
                         lambda _e, k=fs.key: self._commit(k))
+            widget.bind("<Return>", lambda _e, k=fs.key: self._commit(k))
+            if fs.choices or fs.kind == "bool":
+                widget.bind("<<ComboboxSelected>>",
+                            lambda _e, k=fs.key: self._commit(k))
 
         # 错误提示位
         hint = ttk.Label(parent, text="", foreground=_ERROR_FG)
@@ -225,6 +236,10 @@ class FieldTable(ttk.Frame):
         fs = self._fields.get(key_path)
         var = self._vars.get(key_path)
         if fs is None or var is None:
+            return
+        if fs.is_structural:
+            # 防御：结构型配置不得从文本回写（控件本应是只读 Label，
+            # 这里再挡一层，避免外部代码误调 set_value 后触发提交）。
             return
         value = fs.coerce(var.get())
         errors = fs.validate(value)

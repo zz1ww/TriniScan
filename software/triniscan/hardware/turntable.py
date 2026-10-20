@@ -13,10 +13,26 @@
     STATUS          → STATUS <state>
     STOP            → OK
 
-注意
-----
-- 收到 ``OK`` 后还需等待机械稳定（``settle_ms``）再触发相机；
-- ``rotate_deg`` 会阻塞直到 MCU 返回并完成稳定延时。
+**``OK`` 的真实语义（重要）**
+--------------------------------
+固件的运动是**非阻塞**的：``exec_command`` 调用 ``motor_move_degrees()``
+只启动定时器中断就返回，紧接着发送 ``OK``。因此 ::
+
+    OK 到达  ==  "转台开始转"，而不是"转台转到了"
+
+唯一能确认"停稳"的方法有两个，本模块都实现了：
+
+1. 轮询 ``STATUS`` 直到 ``busy=0``（精确，需固件支持，见 :meth:`wait_idle`）；
+2. 固定延时 ``settle_ms``（兜底，不可靠——它不包含运动时间）。
+
+**``settle_ms`` 只是"停转后"的稳定延时**，不含运动时间。总等待时间必须是
+``运动时间 + settle_ms``。运动时间 = ``步数 × step_us``。若 ``settle_ms``
+小于运动时间而只做 ``sleep(settle_ms)``，相机会在转台仍在转动时曝光。
+
+固件的另一个陷阱：运动中收到新的 ``ROT`` / ``STEPS`` 会被
+``motor_move_steps`` 里的 ``if (motor_is_busy()) return;`` **静默丢弃**，
+但 :mod:`cmd.c` 仍然回复 ``OK``。因此 :meth:`rotate_steps` 会校验
+``STATUS`` 的步数增量，发现丢弃时抛 :class:`MotionNotApplied`。
 """
 from __future__ import annotations
 
@@ -36,9 +52,64 @@ except ImportError:  # pragma: no cover
     serial = None
     _HAS_SERIAL = False
 
-__all__ = ["TurntableConfig", "Turntable", "ScanPlan",
-           "plan_scan", "resolve_scan_plan", "apply_scan_plan",
-           "nearest_exact_view_count"]
+#: ``wait_idle`` 的轮询间隔（秒）。固件回包毫秒级，20 ms 足够，
+#: 又不会在 115200 波特率下占满串口。
+_STATUS_POLL_S = 0.02
+
+__all__ = ["TurntableConfig", "Turntable", "ScanPlan", "MotorStatus",
+           "MotionNotApplied", "plan_scan", "resolve_scan_plan",
+           "apply_scan_plan", "nearest_exact_view_count"]
+
+
+class MotionNotApplied(RuntimeError):
+    """运动指令未被固件执行（通常是被 ``motor_is_busy()`` 丢弃）。
+
+    固件在这种情况下仍然回复 ``OK``——这个静默失败会让上位机以为已经
+    转到位，随后拍下的照片属于错误角度。上位机必须自己校验。
+    """
+
+
+@dataclass(frozen=True)
+class MotorStatus:
+    """``STATUS`` 命令的解析结果。
+
+    固件回包格式（见 ``cmd.c``）::
+
+        STATUS <state> <steps> <deg> <busy>
+
+    其中 ``state`` 为 ``IDLE`` / ``MOVING`` / ``HOMING`` / ``ERROR``，
+    ``deg`` 由固件按**它自己的** ``STEPS_PER_REV`` 换算——若该系数与
+    上位机配置不一致，:attr:`firmware_steps_per_rev` 就能暴露出来。
+    """
+
+    state: str = "UNKNOWN"
+    steps: int = 0
+    deg_reported: float = 0.0
+    busy: bool = False
+
+    @property
+    def firmware_steps_per_rev(self) -> Optional[float]:
+        """由 ``steps`` 与 ``deg`` 反解固件使用的每圈微步数。
+
+        固件计算 ``deg = steps * 360 / SPR_fw``，故
+        ``SPR_fw = 360 * steps / deg``。``steps`` 为 0 时无法反解。
+        """
+        if self.steps == 0 or abs(self.deg_reported) < 1e-9:
+            return None
+        return 360.0 * abs(self.steps) / abs(self.deg_reported)
+
+    @classmethod
+    def parse(cls, line: str) -> Optional["MotorStatus"]:
+        """解析 ``STATUS`` 回包；格式不符返回 ``None``。"""
+        parts = line.strip().split()
+        if len(parts) < 5 or parts[0] != "STATUS":
+            return None
+        try:
+            return cls(state=parts[1], steps=int(parts[2]),
+                       deg_reported=float(parts[3]),
+                       busy=parts[4] not in ("0", "", "False"))
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass
@@ -50,7 +121,10 @@ class TurntableConfig:
     steps_per_rev: int = 200        # 电机整步/圈
     microstep: int = 32             # 驱动器细分
     gear_ratio: float = 5.0         # 机械减速比
-    settle_ms: int = 200            # 到位稳定延时
+    #: 每步脉冲间隔（微秒）。必须与固件 ``DEFAULT_STEP_US`` 一致——
+    #: 上位机用它估算运动时长。不一致不会导致转错，只会让等待时间估偏。
+    step_us: int = 900
+    settle_ms: int = 200            # **停转后**的稳定延时（不含运动）
     timeout_s: float = 5.0          # 单条指令超时
 
     @property
@@ -65,6 +139,14 @@ class TurntableConfig:
     def steps_for_angle(self, angle_deg: float) -> float:
         """给定角度对应的理论步数（浮点）。"""
         return self.steps_per_degree * float(angle_deg)
+
+    def motion_time_ms(self, steps: int) -> float:
+        """走 ``steps`` 个微步所需时间（毫秒）。
+
+        固件每个整步占两个半周期，半周期 = ``step_us / 2``，故一步
+        = ``step_us`` 微秒（见 ``firmware/.../motor.c: timer_start``）。
+        """
+        return abs(int(steps)) * float(self.step_us) / 1000.0
 
     def nearest_angle_for_steps(self, steps: int) -> float:
         """给定**整数步数**回算实际角度（度）。"""
@@ -82,6 +164,7 @@ class TurntableConfig:
             steps_per_rev=int(get("steps_per_rev", 200)),
             microstep=int(get("microstep", 32)),
             gear_ratio=float(get("gear_ratio", 5.0)),
+            step_us=int(get("step_us", 900)),
             settle_ms=int(get("settle_ms", 200)),
             timeout_s=float(get("timeout_s", 5.0)),
         )
@@ -142,36 +225,159 @@ class Turntable:
         return self._ser.readline().decode(errors="ignore").strip()
 
     def _wait_ok(self) -> bool:
-        return self._readline() == "OK"
+        """等 ``OK``；固件回 ``ERR ...`` 时记录原因并返回 False。"""
+        line = self._readline()
+        if line == "OK":
+            return True
+        if line:
+            log.warning("固件返回非 OK: %r", line)
+        return False
 
     def _settle(self) -> None:
+        """**停转后**的机械稳定延时（不含运动时间）。"""
         time.sleep(self.cfg.settle_ms / 1000.0)
 
     # ------------------------------------------------------------------
+    # 状态与停稳判定
+    # ------------------------------------------------------------------
+    def read_status(self) -> Optional[MotorStatus]:
+        """读取固件状态；不支持或解析失败返回 ``None``。"""
+        try:
+            self._send("STATUS")
+            line = self._readline()
+        except Exception as exc:            # noqa: BLE001
+            log.debug("读取 STATUS 失败: %s", exc)
+            return None
+        status = MotorStatus.parse(line)
+        if status is None:
+            log.debug("STATUS 回包无法解析: %r", line)
+        return status
+
+    def wait_idle(self, timeout_s: Optional[float] = None) -> bool:
+        """轮询 ``STATUS`` 直到固件报告 ``busy=0``。
+
+        这是"转到位"的**唯一可靠判据**：固件在开始转动时就回了 ``OK``，
+        之后 ``busy`` 会一直为真，直到定时器把脉冲全部发完。
+
+        Parameters
+        ----------
+        timeout_s : 超时（秒）。默认按运动时长估算：调用方应在此之前
+            调用过 :meth:`_expected_motion_s`，否则用配置的指令超时。
+
+        Returns
+        -------
+        bool
+            ``True`` 表示已确认停转；``False`` 表示超时或固件不支持
+            ``STATUS``。**调用方必须据此决定是否仍要拍照**——返回 False
+            时本方法已退回"等待运动时长 + settle_ms"，但那只是估算。
+        """
+        status = self.read_status()
+        if status is None:
+            # 固件不支持 STATUS（或串口异常）：按运动时长估算兜底。
+            log.debug("STATUS 不可用，回退为定时等待")
+            return False
+        if not status.busy:
+            return True
+
+        limit = (self.cfg.timeout_s if timeout_s is None
+                 else max(float(timeout_s), 0.0))
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            time.sleep(_STATUS_POLL_S)
+            status = self.read_status()
+            if status is None:
+                return False
+            if not status.busy:
+                return True
+
+        log.warning("等待转台停稳超时（%.1f s）", limit)
+        return False
+
+    def _wait_motion_done(self, steps: int) -> bool:
+        """等待一次转动真正结束，并补足 ``settle_ms``。
+
+        总等待 = 运动时间 + ``settle_ms``。运动时间由 ``steps × step_us``
+        给出（固件每整步 ``step_us`` 微秒）。若 ``STATUS`` 可用，则以
+        固件回报的 ``busy=0`` 为准——它比估算更可靠。
+
+        Returns
+        -------
+        bool
+            是否确认停稳（``STATUS`` 不可用时返回 ``False``，但等待仍按
+            估算完成，因此调用方可以继续，只是没有"确认"）。
+        """
+        motion_s = self.cfg.motion_time_ms(steps) / 1000.0
+        confirmed = self.wait_idle(timeout_s=motion_s + self.cfg.timeout_s)
+        if not confirmed:
+            # STATUS 不可用：至少按运动时长等够，再补稳定延时。
+            time.sleep(motion_s)
+        self._settle()
+        return confirmed
+
+    # ------------------------------------------------------------------
     def home(self) -> bool:
-        """归零。"""
+        """归零。
+
+        归零可能持续数十秒（``HOME_MAX_STEPS`` = 1.5 圈）。固件同样在
+        **开始**归零时就回 ``OK``，因此必须等 ``busy=0`` 才能认为到位；
+        否则紧接着的 ``STEPS`` 会被固件丢弃（运动中命令被忽略）。
+        """
         self._send("HOME")
         if not self._wait_ok():
             return False
-        self._settle()
+        self._wait_motion_done(self._home_max_steps())
         self._cumulative_deg = 0.0
         return True
 
+    def _home_max_steps(self) -> int:
+        """归零的最长行程（用于估算等待上限）。"""
+        return int(self.cfg.steps_per_rev_total * 1.5)
+
     def rotate_deg(self, angle: float) -> bool:
-        """相对转动指定角度（度），阻塞至完成并稳定。"""
+        """相对转动指定角度（度），阻塞至完成并稳定。
+
+        .. warning::
+           固件的 ``ROT`` 换算使用 ``STEPS_PER_DEG_X1000`` **整数**
+           截断（``STEPS_PER_REV*1000/360``），每度会少约 1 微步。
+           精度要求高时请用 :meth:`rotate_steps`（流水线即如此）。
+        """
+        steps = int(round(self.cfg.steps_for_angle(angle)))
         self._send(f"ROT {angle:.6f}")
         if not self._wait_ok():
             return False
-        self._settle()
+        self._wait_motion_done(steps)
         self._cumulative_deg += angle
         return True
 
     def rotate_steps(self, steps: int) -> bool:
-        """相对转动指定步数。"""
-        self._send(f"STEPS {int(steps)}")
+        """相对转动指定**整数微步**，阻塞至完成并稳定。
+
+        收到 ``OK`` 之后会再校验 ``STATUS`` 的步数增量：若固件因
+        "运动中"丢弃了这条指令（它仍会回 ``OK``），这里抛
+        :class:`MotionNotApplied`，避免上位机误以为已转到位。
+
+        Raises
+        ------
+        MotionNotApplied
+            指令未被执行，且已通过 ``STATUS`` 确认。
+        """
+        steps = int(steps)
+        before = self.read_status()
+        before_steps = before.steps if before is not None else None
+
+        self._send(f"STEPS {steps}")
         if not self._wait_ok():
             return False
-        self._settle()
+        self._wait_motion_done(steps)
+
+        after = self.read_status()
+        if before_steps is not None and after is not None:
+            applied = after.steps - before_steps
+            if applied != steps:
+                raise MotionNotApplied(
+                    f"转台未执行命令：请求 {steps:+d} 步，实际 "
+                    f"{applied:+d} 步（固件在运动中丢弃了指令）")
+
         self._cumulative_deg += steps / self.steps_per_degree
         return True
 

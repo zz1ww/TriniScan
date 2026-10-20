@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 
+from ..common.async_writer import AsyncImageWriter
 from ..hardware.camera import Camera
 from ..hardware.turntable import (
     Turntable,
@@ -72,6 +73,25 @@ def _table_supports_steps(table) -> bool:
     这里采用保守策略：仅当明确探测到不支持时才回退。
     """
     return hasattr(table, "rotate_steps")
+
+
+
+#: 异步写图队列的默认深度（张）。30 × 3 MB ≈ 90 MB 峰值内存。
+_DEFAULT_WRITER_QUEUE = 30
+
+
+def _writer_queue_size(cfg) -> int:
+    """异步写图队列深度。
+
+    配置项 ``output.writer_queue`` 可覆盖；缺省 30。队列满时采集端会被
+    阻塞（背压），这是有意为之——宁可慢一点，也不能在慢磁盘上把内存
+    吃光（720 张 1280×800 约 2.1 GB）。
+    """
+    try:
+        value = int(cfg.get("output.writer_queue", _DEFAULT_WRITER_QUEUE))
+    except (TypeError, ValueError):
+        return _DEFAULT_WRITER_QUEUE
+    return max(1, value)
 
 
 def _dominant_band(along: np.ndarray,
@@ -267,28 +287,45 @@ class ScanPipeline:
 
         views = []
         with Camera(self.cfg.raw["camera"]) as cam, \
-                Turntable(self.cfg.raw["turntable"]) as table:
+                Turntable(self.cfg.raw["turntable"]) as table, \
+                AsyncImageWriter(queue_size=_writer_queue_size(self.cfg)) as writer:
+            # 归零可能持续数十秒，固件同样在"开始"时就回 OK——
+            # Turntable.home() 内部已轮询 STATUS 等 busy=0。
             table.home()
             # 有 plan 时用整数步直接驱动，彻底避免固件角度换算误差；
             # 固件不支持 STEPS 时回退到角度指令。
             use_steps = _table_supports_steps(table)
             if not use_steps:
                 log.warning("固件不支持 STEPS，回退按角度驱动（可能有量化误差）")
+            t_start = time.perf_counter()
             for i in range(n):
                 if use_steps:
+                    # rotate_steps 返回时已确认固件 busy=0 且补足 settle_ms，
+                    # 即"转台已静止"，此时抓图不会拍进转动过程。
                     table.rotate_steps(plan.steps_per_step)
                 else:
                     table.rotate_deg(step)
                 path = os.path.join(raw_dir, f"view_{i:04d}.png")
-                image = cam.grab_and_save(path)
+                image = cam.grab()
+                # 落盘交给后台线程：写图不占相机、不占转台，不应阻塞采集。
+                writer.submit(path, image)
                 views.append({
                     "index": i,
                     "angle_deg": step * (i + 1),
                     "image": path,
                     "raw": image,
                 })
-                log.debug("采集 %d/%d (%.3f°)", i + 1, n, step * (i + 1))
-        log.info("采集完成: %d 视角", len(views))
+                if (i + 1) % 10 == 0 or i + 1 == n:
+                    elapsed = time.perf_counter() - t_start
+                    per = elapsed / (i + 1)
+                    log.debug("采集 %d/%d (%.3f°)  %.1f ms/张，"
+                              "预计剩余 %.0f s",
+                              i + 1, n, step * (i + 1), per * 1000,
+                              per * (n - i - 1))
+            # with 退出时排空队列：此刻起所有图片保证已写盘。
+            elapsed = time.perf_counter() - t_start
+        log.info("采集完成: %d 视角，用时 %.1f s（%.1f ms/张）",
+                 len(views), elapsed, elapsed / max(1, len(views)) * 1000)
         return views
 
     # ------------------------------------------------------------------

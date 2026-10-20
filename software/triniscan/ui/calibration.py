@@ -49,6 +49,23 @@ _AXIS_METHOD_LABELS: dict[str, str] = {
     "depth": "激光深度法（快，需激光标定）",
     "sphere": "球心法（亮背景）",
     "peak": "最亮极点法（关环境光）",
+    "chessboard": "棋盘格法（不需激光/标记球）",
+}
+
+#: 标记球类方法的默认操作提示
+_DEFAULT_AXIS_HINT = (
+    "操作：① 先完成「相机内参」与「激光平面」标定；"
+    "② 把涂黑的小球固定在转台偏心位置，确保全程在视野内；"
+    "③ 点击「开始转轴标定」，程序将自动转动转台、逐角度"
+    "拍摄并拟合转轴。")
+
+#: 各取点方法的操作提示（显示在转轴设置区下方）
+_AXIS_METHOD_HINTS: dict[str, str] = {
+    "chessboard": (
+        "操作（棋盘格法）：① 只需先完成「相机内参」标定，**不需要**激光平面；"
+        "② 把棋盘格固定在转台上并离轴 30~60 mm，确保每个角度都能完整拍到；"
+        "③ 点「开始转轴标定」自动转动采集；也可用「开始拍摄」按同一方向"
+        "依次手动拍（无需记录转角）。"),
 }
 
 
@@ -200,16 +217,13 @@ class CalibrationPanel(ttk.Frame):
         # 根本不是合法值（声明里只有 depth/sphere），选中后运行才报错。
         for value, text in _axis_method_choices():
             ttk.Radiobutton(m, text=text, value=value,
-                            variable=self._axis_method).pack(
+                            variable=self._axis_method,
+                            command=self._on_axis_method_change).pack(
                                 side="left", padx=4)
 
         self.lbl_axis_hint = ttk.Label(
             self.axis_opts, foreground="#8a5a00", wraplength=760,
-            justify="left",
-            text=("操作：① 先完成「相机内参」与「激光平面」标定；"
-                  "② 把涂黑的小球固定在转台偏心位置，确保全程在视野内；"
-                  "③ 点击「开始转轴标定」，程序将自动转动转台、逐角度"
-                  "拍摄并拟合转轴。"))
+            justify="left", text=_DEFAULT_AXIS_HINT)
         self.lbl_axis_hint.pack(fill="x", padx=8, pady=(0, 6))
 
         mid = ttk.Frame(self)
@@ -285,6 +299,30 @@ class CalibrationPanel(ttk.Frame):
             )
         return self._session
 
+    def _on_axis_method_change(self) -> None:
+        """切换转轴取点方法：调整提示语、球半径输入与可用的采集按钮。
+
+        棋盘法既支持全自动扫描，也支持手动逐角度拍摄（不需要激光、
+        不需要记录转角），所以此时「开始拍摄」可用。
+        """
+        chessboard = self._axis_method.get() == "chessboard"
+        self.lbl_axis_hint.configure(
+            text=_AXIS_METHOD_HINTS.get(self._axis_method.get(),
+                                        _DEFAULT_AXIS_HINT))
+        # 棋盘法不需要球半径，置灰避免误导
+        try:
+            self.ent_radius.configure(
+                state="disabled" if chessboard else "normal")
+        except Exception:                     # noqa: BLE001 - 控件未建好
+            pass
+        if self._current_mode() is CalibMode.AXIS and not self._busy:
+            state = "normal" if chessboard else "disabled"
+            self.btn_shoot.configure(state=state)
+            self.btn_live.configure(state=state)
+        self.store.update_many({"axis_calib.method": self._axis_method.get()})
+        self.cfg = self.store.cfg
+        self._session = None                  # 去重阈值随方法变化
+
     def _on_mode_change(self) -> None:
         self._stop_live()
         self._session = None
@@ -298,10 +336,11 @@ class CalibrationPanel(ttk.Frame):
             self.axis_opts.pack(fill="x", padx=6, pady=(4, 0),
                                 before=self.preview.master)
             self.btn_calib.configure(text="开始转轴标定")
-            self.btn_shoot.configure(state="disabled")
-            self.btn_live.configure(state="disabled")
-            self._append_verdict(
-                "转轴模式：请放好标记球，点击「开始转轴标定」全自动完成。")
+            self._on_axis_method_change()
+            if self._axis_method.get() != "chessboard":
+                self._append_verdict(
+                    "转轴模式：请放好标记球，点击「开始转轴标定」"
+                    "全自动完成。")
         else:
             self.axis_opts.pack_forget()
             self.btn_calib.configure(text="开始标定")
@@ -405,6 +444,20 @@ class CalibrationPanel(ttk.Frame):
 
     def _on_calibrate(self) -> None:
         if self._current_mode() is CalibMode.AXIS:
+            session = self._ensure_session()
+            # 棋盘法：已手动拍够张数时，直接用手拍图标定（不必再自动转）
+            if (self._axis_method.get() == "chessboard"
+                    and session.ready):
+                self._set_busy(True)
+                self._append_verdict(
+                    f"用已拍摄的 {session.count} 张棋盘图拟合转轴…")
+
+                def _run() -> None:
+                    self._queue.put(("calib_done", session.run_calibration()))
+
+                threading.Thread(target=_run, daemon=True,
+                                 name="triniscan-axis-calib").start()
+                return
             self._start_axis_sweep()
             return
 
@@ -430,14 +483,23 @@ class CalibrationPanel(ttk.Frame):
     # ------------------------------------------------------------------
     def _read_axis_params(self) -> bool:
         """读取并校验界面上的转轴参数，写入 store（内存即时生效）。"""
+        uses_board = self._axis_method.get() == "chessboard"
         try:
             radius_mm = float(self._sphere_radius_mm.get())
             views = int(self._axis_views.get())
         except ValueError:
-            messagebox.showerror("参数错误", "球半径与角度数必须是数字。")
+            if uses_board:
+                messagebox.showerror("参数错误", "采样角度数必须是数字。")
+            else:
+                messagebox.showerror("参数错误",
+                                     "球半径与角度数必须是数字。")
             return False
-        if radius_mm <= 0 or views < 3:
-            messagebox.showerror("参数错误", "球半径需 > 0，角度数需 >= 3。")
+        if views < 3:
+            messagebox.showerror("参数错误", "角度数需 >= 3。")
+            return False
+        # 棋盘法不用球，球半径填什么都不能拦（用户可能留着旧值）
+        if not uses_board and radius_mm <= 0:
+            messagebox.showerror("参数错误", "球半径需 > 0。")
             return False
         # 通过 store 写入，界面会提示"未保存"，用户可一键落盘
         self.store.update_many({
@@ -449,11 +511,17 @@ class CalibrationPanel(ttk.Frame):
         return True
 
     def _missing_prereqs(self) -> list:
-        """返回缺失的前置标定文件说明（空列表表示齐全）。"""
+        """返回缺失的前置标定文件说明（空列表表示齐全）。
+
+        棋盘格法只用相机内参（板位姿由整块棋盘给出），因此**不要求**
+        激光平面标定——这是它相对标记球法的最大便利。
+        """
         import os
+        needed = [("calibration.camera_file", "相机内参")]
+        if self._axis_method.get() != "chessboard":
+            needed.append(("calibration.laser_file", "激光平面"))
         missing = []
-        for key, label in (("calibration.camera_file", "相机内参"),
-                           ("calibration.laser_file", "激光平面")):
+        for key, label in needed:
             path = self.cfg.get(key, None)
             if path and not os.path.isabs(path):
                 path = os.path.join(getattr(self.cfg, "root", "."), path)
@@ -511,6 +579,14 @@ class CalibrationPanel(ttk.Frame):
         frac = min(session.count / rec, 1.0)
         self.bar_progress.configure(value=frac * 100)
         if self._current_mode() is CalibMode.AXIS:
+            if self._axis_method.get() == "chessboard":
+                # 棋盘法支持手动逐角度拍摄：撤销/清空/拍够后直接标定
+                state = "normal" if session.count else "disabled"
+                self.btn_undo.configure(state=state)
+                self.btn_clear.configure(state=state)
+                self.btn_calib.configure(
+                    state="disabled" if self._busy else "normal")
+                return
             self.btn_undo.configure(state="disabled")
             self.btn_clear.configure(state="disabled")
             self.btn_calib.configure(
@@ -535,6 +611,11 @@ class CalibrationPanel(ttk.Frame):
             self.btn_live.configure(state="normal")
             if self._capturing:
                 self.btn_shoot.configure(state="normal")
+        elif self._axis_method.get() == "chessboard":
+            # 棋盘法：解除忙态后恢复手动逐角度拍摄
+            self.btn_live.configure(state="normal")
+            self.btn_shoot.configure(
+                state="normal" if self._capturing else "disabled")
 
     def _append_verdict(self, text: str) -> None:
         self.txt_verdict.configure(state="normal")

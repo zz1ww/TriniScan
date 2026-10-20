@@ -121,6 +121,8 @@ class CaptureSession:
     MIN_SIDE_PX = 12.0
     #: 与已收集帧的最小差异——低于此判为重复
     NOVELTY_MIN = 0.02
+    #: 棋盘法转轴用的去重阈值（各角度图像本来就相似，只挡"完全没动"）
+    NOVELTY_AXIS_MIN = 0.004
 
     def __init__(self, mode: CalibMode, cfg, save_images: bool = True,
                  on_log: Optional[Callable[[str], None]] = None) -> None:
@@ -152,6 +154,12 @@ class CaptureSession:
         log.info(msg)
         if self._on_log is not None:
             self._on_log(msg)
+
+    def _is_axis_chessboard(self) -> bool:
+        """当前是否为"棋盘法转轴"模式（需要按角度逐张拍摄）。"""
+        return (self.mode is CalibMode.AXIS
+                and str(self._cfg_get("axis_calib.method", ""))
+                == "chessboard")
 
     # ------------------------------------------------------------------
     # 采集
@@ -211,7 +219,12 @@ class CaptureSession:
             )
 
         novelty = self._novelty(image)
-        if novelty < self.NOVELTY_MIN:
+        # 棋盘法转轴把每张图当作"转台转过一个角度"：两张**完全一样**的图
+        # 说明转台没动，必然无效；但"相似"不代表无效（新参数下用更松的
+        # 阈值，避免把正常的小角度变化判为重复）。
+        novelty_min = (self.NOVELTY_AXIS_MIN
+                       if self._is_axis_chessboard() else self.NOVELTY_MIN)
+        if novelty < novelty_min:
             return QualityVerdict(
                 ok=False,
                 reason="与已有图片过于相似，请更换棋盘格姿态",
@@ -221,9 +234,12 @@ class CaptureSession:
                 novelty=novelty,
             )
 
+        reason = "质量合格，已收录"
+        if self._is_axis_chessboard():
+            reason += f"（第 {self.count + 1} 个角度）"
         return QualityVerdict(
             ok=True,
-            reason="质量合格，已收录",
+            reason=reason,
             num_corners=det.num_corners,
             area_ratio=det.area_ratio,
             sharpness=det.sharpness,
@@ -311,8 +327,12 @@ class CaptureSession:
     def run_calibration(self) -> CalibOutcome:
         """用已收集的图像执行标定并保存。
 
-        转轴模式用 ``images`` 中累积的 3D 特征点（见
-        :meth:`add_axis_points`）而非图像，故此处仅处理相机/激光。
+        转轴模式下：
+
+        - ``axis_calib.method == "chessboard"``：用 ``images`` 里**手动拍**
+          的棋盘格图直接拟合转轴（不需要激光、不需要标记球）；
+        - 其它方法用累积的 3D 特征点（见
+          :meth:`calibrate_axis_from_points`），此处返回提示。
         """
         t0 = time.time()
         try:
@@ -320,9 +340,13 @@ class CaptureSession:
                 return self._calibrate_camera(t0)
             if self.mode is CalibMode.LASER:
                 return self._calibrate_laser(t0)
+            if (self.mode is CalibMode.AXIS
+                    and str(self._cfg_get("axis_calib.method", ""))
+                    == "chessboard"):
+                return self._calibrate_axis_chessboard(t0)
             return CalibOutcome(
                 ok=False, mode=self.mode,
-                message="转轴标定请使用 add_axis_points 接口",
+                message="转轴标定请使用 calibrate_axis_from_points 接口",
                 elapsed_s=time.time() - t0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -407,6 +431,71 @@ class CaptureSession:
             out_path=out_path, elapsed_s=time.time() - t0,
         )
 
+    def _calibrate_axis_chessboard(self, t0: float) -> CalibOutcome:
+        """棋盘格法（手动拍照）：用已收集的棋盘图拟合转轴。
+
+        图像按**拍摄顺序**视为转台旋转顺序；不要求记录每张的转角——
+        转轴方向的正负由相邻帧板的相对旋转自动判定。
+        """
+        from ..algorithms.calibration import (
+            ChessboardAxisCollector,
+            load_camera_calib,
+        )
+
+        cam_file = self._cfg_get("calibration.camera_file", None)
+        if cam_file and not os.path.isabs(cam_file):
+            cam_file = os.path.join(
+                getattr(self.cfg, "root", "."), cam_file)
+        if not cam_file or not os.path.exists(cam_file):
+            return CalibOutcome(
+                ok=False, mode=self.mode,
+                message=f"请先完成相机标定：{cam_file}",
+                elapsed_s=time.time() - t0)
+
+        cam = load_camera_calib(cam_file)
+        collector = ChessboardAxisCollector(
+            cam.K, cam.dist,
+            pattern_cols=self.pattern_cols,
+            pattern_rows=self.pattern_rows,
+            square_size_m=self.square_size_m,
+            use_sb=bool(self._cfg_get("camera_calib.use_sb", True)),
+            use_center=bool(
+                self._cfg_get("axis_calib.chessboard_use_center", True)),
+            orientation=str(self._cfg_get(
+                "axis_calib.chessboard_orientation", "landscape")),
+        )
+        for img in self.images:
+            collector.add_angle(img, angle_deg=None)
+        collector.finalize()
+
+        if collector.count < CalibMode.AXIS.min_views:
+            detail = "；".join(collector.errors[:5])
+            return CalibOutcome(
+                ok=False, mode=self.mode,
+                message=(f"有效棋盘视角不足（{collector.count} < "
+                         f"{CalibMode.AXIS.min_views}）：{detail}"),
+                elapsed_s=time.time() - t0)
+
+        out_path = self._cfg_get("calibration.axis_file", None)
+        if out_path and not os.path.isabs(out_path):
+            out_path = os.path.join(
+                getattr(self.cfg, "root", "."), out_path)
+
+        result = collector.calibrate(out_path=out_path)
+        rms = float(result.residual_rms)
+        msg = (f"转轴标定完成（棋盘法）：{collector.count} 个视角，"
+               f"半径 {result.radius * 1e3:.1f} mm，"
+               f"残差 RMS = {rms * 1e3:.3f} mm")
+        if collector.errors:
+            msg += f"；{len(collector.errors)} 张未检出棋盘格"
+        if rms > 1e-3:
+            msg += "（警告：残差偏大，建议重拍）"
+        return CalibOutcome(
+            ok=True, mode=self.mode, message=msg,
+            quality=f"RMS={rms * 1e3:.3f} mm",
+            out_path=out_path, elapsed_s=time.time() - t0,
+        )
+
     def calibrate_axis_from_points(
             self, feature_points: np.ndarray) -> CalibOutcome:
         """由绕轴旋转的特征点三维坐标完成转轴标定。"""
@@ -464,7 +553,21 @@ def sweep_axis_calibration(
     save_images: bool = False,
     stop_flag: Optional[Callable[[], bool]] = None,
 ) -> AxisSweepResult:
-    """**全自动**转轴标定：转台转 N 个角度，逐个拍照并提取标记球。
+    """**全自动**转轴标定：转台转 N 个角度，逐个拍照并提取特征。
+
+    取点方法由 ``axis_calib.method`` 决定，**只影响采集器，不影响后续
+    拟合与质检**：
+
+    ===========  ==========================================================
+    method       采集什么
+    ===========  ==========================================================
+    depth        标记球的激光深度
+    sphere       标记球的圆心像素 + 像素半径
+    chessboard   棋盘格板位姿（**不需要激光标定、不需要标记球**）
+    ===========  ==========================================================
+
+    因为 chessboard 法不需要激光平面，此时不再要求
+    ``calibration.laser_file`` 存在。
 
     Parameters
     ----------
@@ -481,18 +584,26 @@ def sweep_axis_calibration(
     """
     import cv2
 
-    from ..algorithms.calibration import (AxisLiveCollector,
-                                          load_camera_calib)
-    from ..algorithms.calibration import load_laser_calib
+    from ..algorithms.calibration import load_camera_calib
 
     t0 = time.time()
+
+    def _get(key: str, default):
+        try:
+            return cfg.get(key, default)
+        except AttributeError:
+            return default
+
+    method = str(_get("axis_calib.method", "peak"))
+    # 棋盘法只依赖相机内参：板位姿由整块棋盘给出，与激光无关。
+    needs_laser = method != "chessboard"
 
     def _log_progress(i: int, total: int, msg: str) -> None:
         log.info("[%d/%d] %s", i, total, msg)
         if on_progress is not None:
             on_progress(i, total, msg)
 
-    # --- 前置：两个标定文件必须存在 ---
+    # --- 前置：相机内参必需；激光平面仅非棋盘法需要 ---
     def _resolve(key: str) -> str:
         try:
             path = cfg.get(key, None)
@@ -505,44 +616,61 @@ def sweep_axis_calibration(
         return path
 
     cam_file = _resolve("calibration.camera_file")
-    laser_file = _resolve("calibration.laser_file")
     if not cam_file or not os.path.exists(cam_file):
         return AxisSweepResult(
             ok=False, message=f"请先完成相机标定：{cam_file}")
-    if not laser_file or not os.path.exists(laser_file):
-        return AxisSweepResult(
-            ok=False, message=f"请先完成激光平面标定：{laser_file}")
+
+    from ..algorithms.calibration import (AxisLiveCollector,
+                                          ChessboardAxisCollector,
+                                          board_pattern)
 
     cam = load_camera_calib(cam_file)
-    laser = load_laser_calib(laser_file)
 
     # --- 参数 ---
-    def _get(key: str, default):
-        try:
-            return cfg.get(key, default)
-        except AttributeError:
-            return default
-
     radius = float(_get("axis_calib.sphere_radius_m", 0.020))
-    method = str(_get("axis_calib.method", "peak"))
     num_views = int(_get("axis_calib.num_views", 12))
     step = 360.0 / max(num_views, 1)
+    save_name = "标记球" if needs_laser else "棋盘格"
 
-    collector = AxisLiveCollector(
-        cam.K, laser.plane, sphere_radius_m=radius,
-        method=method, dist=cam.dist,
-        algo_cfg={
-            "spot_threshold": float(_get("axis_calib.spot_threshold", 60.0)),
-            "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
-            "spot_channel": str(_get("axis_calib.spot_channel",
-                                     "red_laser")),
-            "min_radius_px": float(_get("axis_calib.min_radius_px", 8.0)),
-            "max_radius_px": float(_get("axis_calib.max_radius_px", 240.0)),
-            "vertical_hint": np.array(
-                [float(x) for x in _get("axis_calib.vertical_hint",
-                                        [0.0, 0.0, 1.0])]),
-        },
-    )
+    if needs_laser:
+        laser_file = _resolve("calibration.laser_file")
+        if not laser_file or not os.path.exists(laser_file):
+            return AxisSweepResult(
+                ok=False, message=f"请先完成激光平面标定：{laser_file}")
+        from ..algorithms.calibration import load_laser_calib
+        laser = load_laser_calib(laser_file)
+        collector = AxisLiveCollector(
+            cam.K, laser.plane, sphere_radius_m=radius,
+            method=method, dist=cam.dist,
+            algo_cfg={
+                "spot_threshold": float(
+                    _get("axis_calib.spot_threshold", 60.0)),
+                "spot_win_px": int(_get("axis_calib.spot_win_px", 25)),
+                "spot_channel": str(_get("axis_calib.spot_channel",
+                                         "red_laser")),
+                "min_radius_px": float(
+                    _get("axis_calib.min_radius_px", 8.0)),
+                "max_radius_px": float(
+                    _get("axis_calib.max_radius_px", 240.0)),
+                "vertical_hint": np.array(
+                    [float(x) for x in _get("axis_calib.vertical_hint",
+                                            [0.0, 0.0, 1.0])]),
+            },
+        )
+    else:
+        cols, rows, square = board_pattern(cfg)
+        orient = str(_get("axis_calib.chessboard_orientation", "landscape"))
+        total_hint = ("长边水平" if orient == "landscape" else "长边竖直")
+        collector = ChessboardAxisCollector(
+            cam.K, cam.dist,
+            pattern_cols=cols, pattern_rows=rows, square_size_m=square,
+            use_sb=bool(_get("camera_calib.use_sb", True)),
+            use_center=bool(_get("axis_calib.chessboard_use_center", True)),
+            orientation=orient,
+        )
+        _log_progress(0, num_views,
+                      f"棋盘法：{cols}×{rows} 内角点，方格 "
+                      f"{square * 1e3:.1f} mm，{total_hint}")
 
     # --- 打开设备 ---
     if make_camera is None:
@@ -570,6 +698,8 @@ def sweep_axis_calibration(
                 img = camera.grab()
                 if img is None:
                     collector.errors.append(f"{angle:.0f}°: 取像失败")
+                    _log_progress(i + 1, num_views,
+                                  f"{angle:.0f}° 取像失败（已跳过）")
                     continue
                 if save_images:
                     try:
@@ -578,10 +708,14 @@ def sweep_axis_calibration(
                             os.path.join(archive_dir, f"{i:03d}.png"), img)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("图像保存失败: %s", exc)
-                point = collector.add_angle(img, angle_deg=angle)
-                if point is None:
+                # 两种采集器的 add_angle 语义不同：AxisLive 返回点坐标
+                # （数组，真值有歧义），Chessboard 返回 bool。统一以"失败
+                # 列表是否增长"判断本帧是否收录成功。
+                n_err = len(collector.errors)
+                collector.add_angle(img, angle_deg=angle)
+                if len(collector.errors) > n_err:
                     _log_progress(i + 1, num_views,
-                                  f"{angle:.0f}° 未找到标记球（已跳过）")
+                                  f"{angle:.0f}° 未找到{save_name}（已跳过）")
                 else:
                     _log_progress(i + 1, num_views,
                                   f"{angle:.0f}° 已收录")
@@ -592,11 +726,17 @@ def sweep_axis_calibration(
             num_views=collector.count,
             elapsed_s=time.time() - t0)
 
+    # 棋盘法：全序列到齐后统一消歧（两种角点排列都试过，这里按朝向定稿）
+    if hasattr(collector, "finalize"):
+        collector.finalize()
+
+    hint = ("请确保每张图都能完整拍到棋盘格（板固定在转台上并离轴放置）"
+            if not needs_laser else
+            "请检查标记球、环境光与取点方法")
     if collector.count < 3:
         return AxisSweepResult(
             ok=False,
-            message=(f"有效视角不足（{collector.count} < 3）。"
-                     f"请检查标记球、环境光与取点方法。"),
+            message=(f"有效视角不足（{collector.count} < 3）。{hint}。"),
             num_views=collector.count, num_failed=len(collector.errors),
             elapsed_s=time.time() - t0)
 
@@ -605,8 +745,7 @@ def sweep_axis_calibration(
         return AxisSweepResult(
             ok=False,
             message=(f"有效视角不足（{collector.count} < {min_views}）。"
-                     f"转轴标定不可靠，请重拍：确保暗环境、激光打亮标记球、"
-                     f"球偏心放置且每个角度转向正确。"),
+                     f"转轴标定不可靠，请重拍：{hint}。"),
             num_views=collector.count, num_failed=len(collector.errors),
             elapsed_s=time.time() - t0)
 
@@ -646,7 +785,7 @@ def sweep_axis_calibration(
             ok=False,
             message=("转轴标定质检未通过，已废弃："
                      + "；".join(problems)
-                     + "。请检查标记球、环境光与取点方法后重拍。"),
+                     + f"。{hint}后重拍。"),
             num_views=collector.count, num_failed=len(collector.errors),
             elapsed_s=time.time() - t0)
 

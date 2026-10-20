@@ -52,15 +52,32 @@ _KIND_INT = "int"
 _KIND_FLOAT = "float"
 _KIND_STR = "str"
 _KIND_NONE = "none"
+#: 结构型配置：**不接受文本输入**，必须由专用编辑器（子面板 / 列表编辑器）
+#: 负责读写。见 :data:`STRUCTURAL_KINDS`。
+_KIND_DICT = "dict"
+_KIND_LIST = "list"
+
+#: 需要专用编辑器、不能用``Entry``表达的种类
+STRUCTURAL_KINDS = frozenset({_KIND_DICT, _KIND_LIST})
 
 
 def _kind_of(value: Any) -> str:
+    """按值的类型判定 ``kind``。
+
+    判定顺序有讲究：``bool`` 是 ``int`` 的子类，必须先判；``dict`` /
+    ``list`` 必须在"兜底当字符串"之前判——否则它们会被渲染成单行文本
+    框，用户一失焦就被 ``str()`` 覆盖，配置结构被静默破坏。
+    """
     if isinstance(value, bool):
         return _KIND_BOOL
     if isinstance(value, int):
         return _KIND_INT
     if isinstance(value, float):
         return _KIND_FLOAT
+    if isinstance(value, dict):
+        return _KIND_DICT
+    if isinstance(value, list):
+        return _KIND_LIST
     if value is None:
         return _KIND_NONE
     return _KIND_STR
@@ -99,6 +116,17 @@ class FieldSpec:
         return self.kind in (_KIND_INT, _KIND_FLOAT)
 
     @property
+    def is_structural(self) -> bool:
+        """是否是需要专用编辑器的结构型配置（``dict`` / ``list``）。
+
+        结构型配置**不能**用文本控件表达：把 ``{'auto_trim': True}``
+        渲染成单行文本后，用户一失焦就会写入字符串，配置结构被静默
+        破坏（``FilterPlugin.read_params`` 随后读不到任何子键，退回
+        默认值）。界面必须改用子面板或列表编辑器。
+        """
+        return self.kind in STRUCTURAL_KINDS
+
+    @property
     def group_key(self) -> str:
         return self.key.split(".", 1)[0]
 
@@ -108,7 +136,12 @@ class FieldSpec:
 
         失败时**原样返回**（保留用户输入，交由 :meth:`validate` 报错），
         不在这里弹框——界面层不该决定交互方式。
+
+        结构型配置（``dict`` / ``list``）**原样返回**：它们的值由专用
+        编辑器直接产生，任何文本转换都只会破坏结构。
         """
+        if self.is_structural:
+            return raw
         if self.choices is not None:
             # 候选项可能带类型（如 180 是 int），按候选值本身的类型还原
             for c in self.choices:
@@ -141,6 +174,8 @@ class FieldSpec:
     def validate(self, value: Any) -> list[str]:
         """校验并返回错误信息列表（空列表 = 通过）。"""
         errors: list[str] = []
+        if self.is_structural:
+            return self._validate_structural(value)
         if self.choices is not None and value not in self.choices:
             errors.append(f"{self.key} 必须是 {self.choices} 之一，"
                           f"当前 {value!r}")
@@ -158,8 +193,27 @@ class FieldSpec:
             errors.append(f"{self.key} 必须是整数（当前 {value}）")
         return errors
 
+    def _validate_structural(self, value: Any) -> list[str]:
+        """结构型配置的校验：只要求类型正确，内部键不在此处递归。"""
+        expect = (dict if self.kind == _KIND_DICT else list)
+        if not isinstance(value, expect):
+            return [f"{self.key} 必须是 {expect.__name__}（当前 "
+                    f"{type(value).__name__}）；该配置须由专用编辑器修改"]
+        return []
+
     def to_text(self, value: Any) -> str:
-        """配置值 → 控件文本。"""
+        """配置值 → 控件文本。
+
+        结构型配置没有合理的单行文本表示，返回类型标记而非完整 ``repr``：
+        界面据此显示"（结构型，需专用编辑器）"，而不是把整段字典灌进
+        输入框诱导用户编辑。
+        """
+        if self.is_structural:
+            if value is None:
+                return ""
+            name = type(value).__name__
+            size = len(value) if hasattr(value, "__len__") else "?"
+            return f"（{name}，{size} 项）"
         if isinstance(value, bool):
             return "是" if value else "否"
         if value is None:

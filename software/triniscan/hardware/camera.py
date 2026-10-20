@@ -24,6 +24,10 @@ log = get_logger(__name__)
 
 __all__ = ["CameraConfig", "Camera"]
 
+#: 判定"灰度画面"的通道差容差（灰度级）。
+#: YUV→BGR 的整数换算误差不超过 2，正常彩色场景远大于此。
+_MONO_TOLERANCE = 3
+
 
 @dataclass
 class CameraConfig:
@@ -137,9 +141,11 @@ class Camera:
                 f"(backend={self.cfg.backend})"
             )
 
-        # 顺序很重要：先设 FOURCC（像素格式/压缩），再设分辨率与帧率。
-        # 若只设分辨率，DSHOW 下相机会默认输出未压缩 YUY2，
-        # 1080p 时受 USB 带宽限制只能跑到约 5 FPS。
+        # 顺序很重要：先设分辨率，再设像素格式。
+        # 部分 UVC 驱动在改变分辨率时会重置像素格式，若先设四码再设
+        # 分辨率，四码会被冲掉，相机退回未压缩 YUY2——1280×800 下受
+        # USB2.0 带宽限制只能跑约 10 FPS，而 MJPG 可达约 69 FPS。
+        # 详见 :meth:`_apply_format`。
         self._apply_format()
         self._lock_params()
         self._warmup()
@@ -156,47 +162,97 @@ class Camera:
         return self
 
     def _apply_format(self) -> None:
-        """设置像素格式 / 分辨率 / 帧率（顺序敏感）。
+        """设置分辨率 / 帧率 / 像素格式。
+
+        顺序为什么是「先分辨率、后四码」
+        ---------------------------------
+        部分 UVC 驱动（实测 ``CAP_DSHOW`` + Sunplus 方案）在**改变分辨率
+        时会重置像素格式**。若先设四码再设分辨率，四码会被冲掉，相机
+        退回默认的未压缩 ``YUY2``——1280×800 下这种未压缩流受 USB2.0
+        带宽限制只能跑 10 FPS，而 ``MJPG`` 可达 69 FPS。相差 7 倍。
+
+        因此这里固定为：分辨率 → 帧率 → 四码，最后回读确认，必要时
+        **重设一次分辨率并再次确认四码**，确保两者同时成立。
 
         黑白相机优先用 ``fourcc_mono``（通常 ``Y800``）：部分相机在
-        ``MJPG`` 下会强制输出彩色（内插），导致实际并非真单色。
-        设完后回读确认，失败则回退 ``fourcc``。
+        ``MJPG`` 下会强制输出彩色（内插）。不支持时回退 ``fourcc``。
+
+        注意：``Y800`` 是 DirectShow 工业相机格式，**通用 UVC 相机通常
+        不支持**。不支持时回读值不会等于请求值，此时记录为未生效并
+        回退，而不是假装成功。
         """
         assert self._cap is not None
         self._active_fourcc = ""
 
-        candidates = []
-        if self.cfg.mono and self.cfg.fourcc_mono:
-            candidates.append(self.cfg.fourcc_mono)
-        if self.cfg.fourcc:
-            candidates.append(self.cfg.fourcc)
+        candidates = [c for c in (
+            self.cfg.fourcc_mono if self.cfg.mono else "",
+            self.cfg.fourcc,
+        ) if c]
 
-        for cc in candidates:
-            if not cc:
-                continue
-            self._cap.set(cv2.CAP_PROP_FOURCC,
-                          cv2.VideoWriter_fourcc(*cc))
-            got = _fourcc_to_str(
-                int(self._cap.get(cv2.CAP_PROP_FOURCC)))
-            if got.upper() == cc.upper() or not got:
-                self._active_fourcc = cc
-                break
-            log.debug("fourcc %s 未生效（当前 %s），尝试下一个", cc, got)
-        else:
-            if candidates:
-                self._active_fourcc = candidates[-1]
+        # --- 阶段 1：分辨率与帧率 -------------------------------------
+        self._apply_size()
 
+        # --- 阶段 2：像素格式（最后设，不被后续调用覆盖）-------------
+        if candidates:
+            self._active_fourcc = self._try_fourccs(candidates)
+            # 四码设置可能反过来改变可用分辨率，回读并纠正一次。
+            if not self._size_matches():
+                log.debug("设置 fourcc 后分辨率被改变，重设一次")
+                self._apply_size()
+                if not self._size_matches():
+                    real = (int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                            int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                    log.warning(
+                        "相机不接受 %dx%d，实际输出 %dx%d"
+                        "（四码 %s 可能限制了可用分辨率）",
+                        self.cfg.width, self.cfg.height, real[0], real[1],
+                        self._active_fourcc or "默认")
+
+        # 限制驱动内部缓冲，避免读到陈旧帧（降低延迟）
+        try:
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:  # noqa: BLE001 - 部分后端不支持
+            pass
+
+    def _apply_size(self) -> None:
+        """设置分辨率与帧率。"""
+        assert self._cap is not None
         if self.cfg.width > 0:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
         if self.cfg.height > 0:
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
         if self.cfg.fps > 0:
             self._cap.set(cv2.CAP_PROP_FPS, self.cfg.fps)
-        # 限制驱动内部缓冲，避免读到陈旧帧（降低延迟）
-        try:
-            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:  # noqa: BLE001 - 部分后端不支持
-            pass
+
+    def _size_matches(self) -> bool:
+        """回读分辨率是否与请求一致（未请求时不校验）。"""
+        assert self._cap is not None
+        if self.cfg.width <= 0 or self.cfg.height <= 0:
+            return True
+        real_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        real_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return (real_w, real_h) == (self.cfg.width, self.cfg.height)
+
+    def _try_fourccs(self, candidates: list[str]) -> str:
+        """按优先级尝试四码，返回**实际生效**的那个（可能为空）。"""
+        assert self._cap is not None
+        for cc in candidates:
+            self._cap.set(cv2.CAP_PROP_FOURCC,
+                          cv2.VideoWriter_fourcc(*cc))
+            got = _fourcc_to_str(int(self._cap.get(cv2.CAP_PROP_FOURCC)))
+            if got.upper() == cc.upper():
+                log.debug("fourcc %s 已生效", cc)
+                return cc
+            if not got:
+                # 后端不回读四码：无法验证，只能采信请求值。
+                log.debug("fourcc %s：后端不回读，按请求值处理", cc)
+                return cc
+            log.debug("fourcc %s 未生效（当前 %s），尝试下一个", cc, got)
+
+        real = _fourcc_to_str(int(self._cap.get(cv2.CAP_PROP_FOURCC)))
+        log.warning("所有四码均未生效（当前 %s），将使用驱动默认格式；"
+                    "高分辨率下帧率可能受 USB 带宽严重限制", real or "未知")
+        return real
 
     def _lock_params(self) -> None:
         assert self._cap is not None
@@ -218,21 +274,47 @@ class Camera:
     def _probe_channels(self) -> None:
         """读一帧探测实际通道数，判定是否黑白。
 
-        黑白相机输出 ``(H, W)``，彩色输出 ``(H, W, 3)``。以实测为准，
-        并记录到日志，便于发现"配置说黑白、实物却是彩色"之类的错配。
+        两级判据
+        --------
+        1. 单通道 ``(H, W)`` → 黑白（相机直出灰度，最优）；
+        2. 三通道但 **R≡B 且 |R−G| 很小** → 仍是黑白相机，只是被 UVC
+           包装成 ``YUY2``/``MJPG`` 后由 OpenCV 解码扩展成 BGR。
+           UVC 没有"纯灰度"格式，灰度值被复制到 Y、并令 U≈V≈128，
+           转换后三通道只差 1~2 个灰度级。这种情况若只看 ``ndim``
+           会误报"彩色相机"，日志误导排查方向。
+
+        判据阈值取 3 个灰度级：正常彩色场景的通道差远大于此，
+        而 YUV 整数换算误差不会超过 2。
         """
         if self._cap is None:
             return
         ok, frame = self._cap.read()
         if not ok or frame is None:
             return
-        self._is_mono = bool(frame.ndim == 2)
+
+        if frame.ndim == 2:
+            self._is_mono = True
+            log.info("相机输出单通道灰度")
+            return
+
+        b = frame[..., 0].astype(np.int16)
+        g = frame[..., 1].astype(np.int16)
+        r = frame[..., 2].astype(np.int16)
+        # 用中位数而非均值：抗少量彩色像素（如激光本身）干扰
+        mono_like = (np.median(np.abs(r - b)) <= _MONO_TOLERANCE
+                     and np.median(np.abs(r - g)) <= _MONO_TOLERANCE)
+        self._is_mono = bool(mono_like)
+
         if self._is_mono and not self.cfg.mono:
-            log.warning("相机实际输出单通道（黑白），但配置 mono=False；"
-                        "建议设置 camera.mono=true")
-        elif not self._is_mono and self.cfg.mono:
-            log.warning("相机实际输出三通道（彩色），但配置 mono=True；"
-                        "黑白 fourcc 可能未生效，详见上方 fourcc 日志")
+            log.warning("相机实际输出灰度画面（三通道但无色差），"
+                        "但配置 mono=false；建议设置 camera.mono=true")
+        elif self._is_mono:
+            log.info("黑白相机被 UVC 包装为三通道（YUV→BGR），"
+                     "提取时按灰度处理")
+        elif self.cfg.mono:
+            log.warning("相机输出三通道**彩色**，但配置 mono=true；"
+                        "黑白 fourcc 未生效（详见上方 fourcc 日志），"
+                        "彩色内插会稀释激光灰度")
 
     # ------------------------------------------------------------------
     def read(self) -> np.ndarray:

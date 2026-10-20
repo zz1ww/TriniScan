@@ -59,6 +59,7 @@ FIELD_LABELS: dict[str, str] = {
     "turntable.steps_per_rev": "每圈整步数",
     "turntable.microstep": "细分倍数",
     "turntable.gear_ratio": "减速比",
+    "turntable.step_us": "每步脉冲间隔",
     "turntable.settle_ms": "到位稳定延时",
     "turntable.timeout_s": "指令超时",
 
@@ -223,11 +224,16 @@ FIELD_HINTS: dict[str, str] = {
     "camera.auto_wb": "必须关闭，保证各视角颜色一致",
     "camera.discard_frames": "每次抓图前丢弃的帧数，等曝光稳定",
 
+    "camera.fourcc": "MJPG 可突破 USB2.0 带宽（1280x800 实测 69fps）；YUY2 只有 10fps",
+    "camera.fourcc_mono": "Y800 仅工业相机支持；通用 UVC 相机留空",
+    "camera.discard_frames": "每张图多等的帧数 × 帧周期，1 帧即够",
     "turntable.port": "设备管理器 → 端口，查看实际 COM 口",
     "turntable.steps_per_rev": "NEMA17 步距角 1.8° → 200",
     "turntable.microstep": "驱动器细分设定，须与实际跳线一致",
     "turntable.gear_ratio": "机械减速比，须与实际机构一致",
-    "turntable.settle_ms": "转台到位后等待稳定的时间",
+    "turntable.step_us": "每步间隔（微秒），须与固件 DEFAULT_STEP_US 一致；"
+                         "上位机据此估算运动时长",
+    "turntable.settle_ms": "转台停转后等待机械稳定的时间（不含运动时间）",
 
     "scan.preset": "720 或 1080 视角；启用后自动回算自洽的每视角转角",
     "scan.angle_step_deg": "每视角转过的角度，越小越密但越慢",

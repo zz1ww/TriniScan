@@ -1,0 +1,52 @@
+# 激光中心线实验台 —— 默认参数
+# 命令行可覆盖任何一项（见 run.py --help）
+
+# ---- 输入 ----
+input:
+  # 图像目录（相对项目根 TriniScan/）
+  dir: data/raw
+  # 只读前 N 张；0 表示全部
+  limit: 0
+  # 文件扩展名
+  ext: .png
+
+# ---- 预处理 ----
+preprocess:
+  # 通道：gray / r / g / b / red_laser / green_laser
+  # 黑白相机必须用 gray（red_laser 会让整张图变成 0）
+  channel: gray
+  # 高斯平滑 σ；<=0 不平滑
+  sigma: 1.5
+  # 条纹比背景暗时设 true
+  invert: false
+  # ROI [x, y, w, h]；null 表示全图
+  roi: null
+
+# ---- 提取 ----
+extract:
+  method: row_peak
+  # 灰度阈值：低于此值的像素不参与
+  threshold: 60.0
+  # 每个截面至少要有这么多像素才取中心
+  min_pixels: 1
+  # 算法专属参数（--param 覆盖这里）
+  params: {}
+
+# ---- 三角测量（标定文件相对 software/）----
+calib:
+  camera: software/config/calib_camera.npz
+  laser: software/config/calib_laser.npz
+  axis: software/config/calib_axis.npz
+
+# ---- 多视角拼接 ----
+stack:
+  # 每视角转角（度）；null 表示按张数自动算 360/N
+  angle_step_deg: null
+  # 下采样体素（米）；0 表示不下采样
+  voxel_size: 0.0
+
+# ---- 输出 ----
+output:
+  dir: lab/outputs
+  # 是否保存每张图的叠加图
+  save_overlay: true
