@@ -123,6 +123,10 @@ class CalibrationPanel(ttk.Frame):
         self._session: Optional[CaptureSession] = None
         self._camera = None
         self._latest_frame: Optional[np.ndarray] = None
+        # 实时线程写入、UI 线程读取的最新帧（受 _frame_lock 保护）。
+        # 与 _poll 的状态机解耦，保证「拍摄」在任何情况下都能拿到帧。
+        self._live_frame: Optional[np.ndarray] = None
+        self._frame_lock = threading.Lock()
         self._capturing = False          # 实时取景是否开启
         self._live_thread: Optional[threading.Thread] = None
         self._live_stop = threading.Event()
@@ -360,6 +364,8 @@ class CalibrationPanel(ttk.Frame):
             return
         self._ensure_session()
         self._live_stop.clear()
+        with self._frame_lock:
+            self._live_frame = None
         self._capturing = True
         self.btn_live.configure(text="停止拍摄")
         self.btn_shoot.configure(state="normal")
@@ -377,6 +383,10 @@ class CalibrationPanel(ttk.Frame):
                         # 用 read() 而非 grab()：实时取景只取最新帧，
                         # 不应逐帧丢弃（否则有效帧率被除以丢弃数）
                         img = cam.read()
+                        if img is not None:
+                            # 供「拍摄」直接取帧；只保留最新一张
+                            with self._frame_lock:
+                                self._live_frame = img
                         self._queue.put(("frame", img))
             except Exception as exc:  # noqa: BLE001
                 self._queue.put(("error", f"相机错误: {exc}"))
@@ -400,11 +410,32 @@ class CalibrationPanel(ttk.Frame):
     # 拍摄
     # ------------------------------------------------------------------
     def _on_shoot(self) -> None:
-        # 实时取景中：从最近一帧抓取；否则同步抓一帧
+        # 实时取景中：直接取后台线程缓存的最新帧。
+        #
+        # 这里**不再**通过队列让 _poll 去取 _latest_frame：_poll 若因
+        # 任何原因停止调度（窗口重排、异常被吞），消息会永远堆在队列里，
+        # 表现就是"点了拍摄完全没反应"。改为直接读线程共享的缓冲，
+        # 与 _poll 是否健在无关。
+        if self._live_thread_alive():
+            frame = self._live_grab()
+            if frame is not None:
+                self._handle_frame(frame, do_eval=True)
+                return
+            self.lbl_status.configure(text="相机正在预热…")
+            self._append_verdict(
+                "相机尚未就绪：请等预览画面出现后再点「拍摄」。")
+            return
         if self._capturing:
-            self._queue.put(("shoot", None))
-        else:
-            self._shoot_once()
+            # 线程刚退出但标志未清：走一次独立拍摄，避免彻底无响应
+            self._append_verdict(
+                "实时取景已中断，改为单帧拍摄…")
+        self._shoot_once()
+
+    def _live_grab(self):
+        """取实时线程的最新一帧（线程安全）；无帧返回 None。"""
+        with self._frame_lock:
+            frame = self._live_frame
+        return None if frame is None else frame.copy()
 
     def _shoot_once(self) -> None:
         try:
@@ -639,10 +670,22 @@ class CalibrationPanel(ttk.Frame):
                 elif kind == "shoot":
                     # 注意：不能用 `latest_frame or self._latest_frame`，
                     # numpy 数组的布尔求值会抛 ValueError（歧义）。
-                    frame = latest_frame if latest_frame is not None \
-                        else self._latest_frame
+                    frame = (latest_frame if latest_frame is not None
+                             else self._latest_frame)
                     if frame is not None:
                         self._handle_frame(frame, do_eval=True)
+                    elif not self._live_thread_alive():
+                        # 实时线程已退出且无缓存帧：绝不能同步开相机（设备可能
+                        # 仍被占用，会冻住界面）。明确告知，不要静默吞掉点击。
+                        self.lbl_status.configure(text="拍摄失败")
+                        self._append_verdict(
+                            "拍摄失败：实时取景已中断，没有可用画面。"
+                            "请点「开始拍摄」重新打开相机后再拍。")
+                    else:
+                        # 线程活着但首帧还没到达界面（刚开相机的几百毫秒）。
+                        self.lbl_status.configure(text="相机正在预热…")
+                        self._append_verdict(
+                            "相机尚未就绪：请等预览画面出现后再点「拍摄」。")
                 elif kind == "live_stopped":
                     self._capturing = False
                     self.btn_live.configure(text="开始拍摄")
@@ -695,6 +738,11 @@ class CalibrationPanel(ttk.Frame):
     def on_hide(self) -> None:
         """切换到其它界面时调用：停止实时取景，释放相机。"""
         self._stop_live()
+
+    def _live_thread_alive(self) -> bool:
+        """实时取景线程是否仍在运行（即相机是否还开着）。"""
+        t = self._live_thread
+        return bool(t is not None and t.is_alive())
 
     @property
     def latest_frame(self) -> Optional[np.ndarray]:

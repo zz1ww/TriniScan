@@ -115,6 +115,8 @@ FIELD_LABELS: dict[str, str] = {
     "laser_calib.save_images": "保存标定原图",
     "laser_calib.clip_margin_px": "中心线裁剪边距",
     "laser_calib.channel": "激光标定提取通道",
+    "laser_calib.use_diff": "双图差分标定",
+    "laser_calib.diff_threshold": "差分阈值",
 
     # --- 标定质量阈值 ---
     "quality.camera_rms_good": "相机 RMS 优秀",
@@ -151,7 +153,6 @@ FIELD_LABELS: dict[str, str] = {
     "extraction.enhance_scale_to_width": "按宽度缩放",
     "extraction.enhance_min_peak": "最小峰值",
     "extraction.channel": "中心线提取通道",
-    "laser_calib.channel": "激光标定提取通道",
 
     # --- 三维重建 ---
     "reconstruction.voxel_size": "体素尺寸",
@@ -270,6 +271,8 @@ FIELD_HINTS: dict[str, str] = {
     "laser_calib.outlier_mm": "稳健拟合的离群点距离阈值",
     "laser_calib.save_images": "保存激光标定原图，便于复查中心线提取",
     "laser_calib.channel": "red_laser=彩色相机用颜色差分（推荐）；gray=黑白相机",
+    "laser_calib.use_diff": "开启后每 2 张为一对交替采集：奇数位关激光、偶数位开激光。差分把静止的背景/棋盘扣除，只剩激光线，适合黑白相机看不到激光颜色的情况",
+    "laser_calib.diff_threshold": "差分图中超过此亮度才视为激光（过低会引入噪声，过高会漏掉暗处的激光）",
     "laser_calib.clip_margin_px": "把中心线裁剪到棋盘格凸包内的额外边距；0=紧贴棋盘边界，可去除棋盘外的伪中心线点",
 
     "quality.camera_rms_good": "相机重投影 RMS 优秀线（px）",

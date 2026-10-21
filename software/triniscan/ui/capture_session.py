@@ -123,6 +123,10 @@ class CaptureSession:
     NOVELTY_MIN = 0.02
     #: 棋盘法转轴用的去重阈值（各角度图像本来就相似，只挡"完全没动"）
     NOVELTY_AXIS_MIN = 0.004
+    #: 双图差分模式下，同一对内部两张的**最大**差异——超过此判为
+    #: "棋盘被碰动了"。一对内部只应有激光线之差，理应是全流程最相似
+    #: 的两帧；阈值反着用（越小越合格）。
+    DIFF_PAIR_MAX_DIFF = 0.08
 
     def __init__(self, mode: CalibMode, cfg, save_images: bool = True,
                  on_log: Optional[Callable[[str], None]] = None) -> None:
@@ -140,7 +144,12 @@ class CaptureSession:
 
         self.images: list[np.ndarray] = []
         self.verdicts: list[QualityVerdict] = []
-        self._thumbs: list[np.ndarray] = []   # 低分辨率缩略图，用于去重
+        # 低分辨率缩略图，用于去重；与 self.images 一一对应
+        self._thumbs: list[np.ndarray] = []
+        # 双图差分模式：仅存放**每对第 1 张（关激光）**的缩略图。
+        # 位姿新颖性只在这些帧之间比较——同一次拍摄的两帧位姿必须
+        # 相同，拿它们互相比较会把正确的配对判成"过于相似"。
+        self._pose_thumbs: list[np.ndarray] = []
         self.started_at = time.time()
 
     # ------------------------------------------------------------------
@@ -161,6 +170,19 @@ class CaptureSession:
                 and str(self._cfg_get("axis_calib.method", ""))
                 == "chessboard")
 
+    def _is_diff_pair(self) -> bool:
+        """当前是否为"双图差分"激光标定模式（两帧一对）。
+
+        只有激光标定才有这个概念；其它模式下 ``laser_calib.use_diff``
+        即使为真也不生效。
+        """
+        return (self.mode is CalibMode.LASER
+                and bool(self._cfg_get("laser_calib.use_diff", False)))
+
+    def _expects_dark(self) -> bool:
+        """差分模式下：下一张是否应为"关激光"帧（即当前对尚未开始）。"""
+        return self.count % 2 == 0
+
     # ------------------------------------------------------------------
     # 采集
     # ------------------------------------------------------------------
@@ -172,8 +194,13 @@ class CaptureSession:
         verdict = self.evaluate(image)
         self.verdicts.append(verdict)
         if verdict.ok:
+            # 先按"收录前"的奇偶状态判断这张是什么角色，再追加
+            is_pair_head = self._is_diff_pair() and self._expects_dark()
             self.images.append(image.copy())
-            self._thumbs.append(self._thumbnail(image))
+            thumb = self._thumbnail(image)
+            self._thumbs.append(thumb)
+            if is_pair_head:
+                self._pose_thumbs.append(thumb)
             if self.save_images:
                 self._save_frame(image, len(self.images) - 1)
         return verdict
@@ -218,12 +245,19 @@ class CaptureSession:
                 sharpness=det.sharpness,
             )
 
-        novelty = self._novelty(image)
+        if self._is_diff_pair():
+            return self._judge_diff_pair(image, det)
+        return self._judge_novelty(image, det)
+
+    def _judge_novelty(self, image: np.ndarray,
+                       det) -> QualityVerdict:
+        """常规模式的位姿新颖性判据（相机内参 / 单图激光 / 转轴）。"""
         # 棋盘法转轴把每张图当作"转台转过一个角度"：两张**完全一样**的图
         # 说明转台没动，必然无效；但"相似"不代表无效（新参数下用更松的
         # 阈值，避免把正常的小角度变化判为重复）。
         novelty_min = (self.NOVELTY_AXIS_MIN
                        if self._is_axis_chessboard() else self.NOVELTY_MIN)
+        novelty = self._novelty(image)
         if novelty < novelty_min:
             return QualityVerdict(
                 ok=False,
@@ -246,6 +280,59 @@ class CaptureSession:
             novelty=novelty,
         )
 
+    def _judge_diff_pair(self, image: np.ndarray, det) -> QualityVerdict:
+        """双图差分模式的判定：整对之内要求"几乎相同"，对与对之间要求"不同"。
+
+        这是把"相似"用反了地方的修复：差分配对的前提就是除激光外画面
+        完全不变，因此
+
+        - **偶数位（对首张，关激光）**：与**其它对的对首张**比较，
+          必须拉开差异（棋盘姿态要多样），走常规 ``NOVELTY_MIN``；
+        - **奇数位（对该对第 2 张，开激光）**：只与前一张比较，必须
+          **足够相似**，差异超限说明拍两张之间棋盘被碰动了，差分会把
+          板边缘误判成激光。
+
+        注意"关/开激光"由用户操作决定，这里只按拍摄奇偶位分工，无法
+        也从不去判断激光是否真的亮着——那是 ``diff_laser_images``
+        在标定阶段的职责。
+        """
+        base = dict(
+            num_corners=det.num_corners,
+            area_ratio=det.area_ratio,
+            sharpness=det.sharpness,
+        )
+
+        if self._expects_dark():
+            novelty = self._pose_novelty(image)
+            if novelty < self.NOVELTY_MIN:
+                return QualityVerdict(
+                    ok=False,
+                    reason="与已有图片过于相似，请更换棋盘格姿态",
+                    novelty=novelty, **base)
+            pair_no = self.count // 2 + 1
+            return QualityVerdict(
+                ok=True,
+                reason=f"已收录第 {pair_no} 对的关激光帧，"
+                       f"请保持棋盘不动、打开激光后拍第 2 张",
+                novelty=novelty, **base)
+
+        # 本对的第 2 张：与前一张比，要求高度相似
+        diff = 1.0 - self._similarity(image, self._thumbs[-1])
+        if diff > self.DIFF_PAIR_MAX_DIFF:
+            return QualityVerdict(
+                ok=False,
+                reason=f"与本对第 1 张差异过大（{diff * 100:.1f}%，"
+                       f"上限 {self.DIFF_PAIR_MAX_DIFF * 100:.0f}%），"
+                       f"棋盘格可能被碰动。差分要求除激光外画面完全不变，"
+                       f"请保持棋盘静止后重拍第 2 张",
+                novelty=1.0 - diff, **base)
+        pair_no = (self.count + 1) // 2
+        return QualityVerdict(
+            ok=True,
+            reason=f"第 {pair_no} 对已配对（与关激光帧相差 "
+                   f"{diff * 100:.1f}%）",
+            novelty=1.0 - diff, **base)
+
     # ------------------------------------------------------------------
     # 去重与落盘
     # ------------------------------------------------------------------
@@ -262,12 +349,31 @@ class CaptureSession:
         n = float(np.linalg.norm(v))
         return v / n if n > 1e-9 else v
 
+    @staticmethod
+    def _similarity(image: np.ndarray, thumb: np.ndarray) -> float:
+        """两张图归一化缩略图的相关度（0~1，越大越像）。"""
+        n = float(np.dot(CaptureSession._thumbnail(image), thumb))
+        return max(0.0, min(1.0, n))
+
     def _novelty(self, image: np.ndarray) -> float:
         """与已收集帧的最大差异度（基于归一化缩略图相关度）。"""
         if not self._thumbs:
             return 1.0
         v = self._thumbnail(image)
         sims = [float(np.dot(v, t)) for t in self._thumbs]
+        return 1.0 - max(sims)
+
+    def _pose_novelty(self, image: np.ndarray) -> float:
+        """与**其它对的对首张**的最大差异度。
+
+        差分模式下位姿多样性只应在"对"这一级讨论：同一对的两帧位姿
+        必须一致，因此在整对之内比较恒为 0，会误判。这里只和每对的
+        第 1 张比较。
+        """
+        if not self._pose_thumbs:
+            return 1.0
+        v = self._thumbnail(image)
+        sims = [float(np.dot(v, t)) for t in self._pose_thumbs]
         return 1.0 - max(sims)
 
     def _output_dir(self) -> str:
@@ -310,13 +416,20 @@ class CaptureSession:
         self.images.clear()
         self.verdicts.clear()
         self._thumbs.clear()
+        self._pose_thumbs.clear()
         self.started_at = time.time()
 
     def remove_last(self) -> bool:
         if not self.images:
             return False
+        was_pair_head = (self._is_diff_pair()
+                         and (len(self.images) - 1) % 2 == 0)
         self.images.pop()
         self._thumbs.pop()
+        if was_pair_head and self._pose_thumbs:
+            # 撤销的是某一对的第 1 张：该对的位姿记录也要一并撤掉，
+            # 否则下一张同姿态的关激光帧会被误判成"过于相似"
+            self._pose_thumbs.pop()
         if self.verdicts:
             self.verdicts.pop()
         return True
@@ -409,6 +522,18 @@ class CaptureSession:
         if out_path and not os.path.isabs(out_path):
             out_path = os.path.join(getattr(self.cfg, "root", "."), out_path)
 
+        use_diff = bool(self._cfg_get("laser_calib.use_diff", False))
+        if use_diff:
+            pairs, diff_note = self._build_laser_diff_pairs()
+            if not pairs:
+                return CalibOutcome(
+                    ok=False, mode=self.mode,
+                    message=("差分标定无法进行：" + "\n"
+                             + diff_note).strip(),
+                    elapsed_s=time.time() - t0)
+        else:
+            diff_note = ""
+
         result = calibrate_laser_plane(
             pairs, cam.K, cam.dist,
             pattern_cols=self.pattern_cols,
@@ -418,11 +543,14 @@ class CaptureSession:
             view_reject_mm=self._cfg_get("laser_calib.view_reject_mm", 1.0),
             outlier_mm=self._cfg_get("laser_calib.outlier_mm", 0.5),
             clip_margin_px=self._cfg_get("laser_calib.clip_margin_px", 0.0),
-            channel=self._cfg_get("laser_calib.channel", "red_laser"),
+            channel="gray" if use_diff
+            else self._cfg_get("laser_calib.channel", "red_laser"),
         )
         msg = (f"激光平面标定完成：{result.num_views} 视角，"
                f"{result.num_points} 点，残差 RMS = "
                f"{result.residual_rms * 1e3:.3f} mm")
+        if diff_note:
+            msg = diff_note.rstrip() + "\n" + msg
         if result.residual_rms > 5e-4:
             msg += "（警告：残差偏大，建议重拍）"
         return CalibOutcome(
@@ -430,6 +558,62 @@ class CaptureSession:
             quality=f"RMS={result.residual_rms * 1e3:.3f} mm",
             out_path=out_path, elapsed_s=time.time() - t0,
         )
+
+    def _build_laser_diff_pairs(self):
+        """把会话里的成对图像转成差分标定输入。
+
+        约定 ``images`` 按**奇数位（0,2,4...）= 无激光**、
+        **偶数位（1,3,5...）= 有激光** 交错存放。
+
+        每对先做 :func:`diff_laser_images` 校验（重复拍摄、板移动、
+        光源变化都会被拦下），再从差分图提取中心线，构造
+        ``{"bgr": 暗图, "centerline": 线}``。
+
+        Returns
+        -------
+        (pairs, note) : pairs 为可用输入列表；note 为过程说明。
+            没有任何可用对时 pairs 为空。
+        """
+        from ..algorithms.calibration import (diff_laser_images,
+                                              extract_centerline_from_diff)
+
+        threshold = float(self._cfg_get("laser_calib.diff_threshold", 60.0))
+        use_sb = bool(self._cfg_get("camera_calib.use_sb", True))
+
+        lines = []
+        pairs = []
+        n_pairs = self.count // 2
+        for k in range(n_pairs):
+            dark = self.images[2 * k]
+            lit = self.images[2 * k + 1]
+            res = diff_laser_images(
+                dark, lit, threshold=threshold,
+                pattern_cols=self.pattern_cols,
+                pattern_rows=self.pattern_rows, use_sb=use_sb)
+            if not res.ok:
+                lines.append(f"  第 {k + 1} 对废弃：{res.reason}")
+                continue
+            line = extract_centerline_from_diff(
+                res.diff, threshold=threshold)
+            if len(line) == 0:
+                lines.append(
+                    f"  第 {k + 1} 对废弃：差分后未提取到激光线"
+                    f"（差分亮区 {res.bright_ratio * 100:.2f}%）")
+                continue
+            pairs.append({"bgr": dark, "centerline": line})
+            lines.append(f"  第 {k + 1} 对收录：激光线 {len(line)} 列")
+
+        if self.count % 2:
+            lines.append(
+                f"  警告：共 {self.count} 张，最后 1 张落单已忽略"
+                "（应为成对的「无激光 → 有激光」）")
+
+        head = (f"差分模式：{self.count} 张 → {n_pairs} 对，"
+                f"可用 {len(pairs)} 对")
+        note = "\n".join([head] + lines)
+        for ln in [head] + lines:
+            self._log(ln)
+        return pairs, note
 
     def _calibrate_axis_chessboard(self, t0: float) -> CalibOutcome:
         """棋盘格法（手动拍照）：用已收集的棋盘图拟合转轴。

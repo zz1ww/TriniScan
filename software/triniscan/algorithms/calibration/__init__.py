@@ -14,10 +14,14 @@ from .camera_calib import (
     save_camera_calib,
 )
 from .laser_calib import (
+    DiffPairResult,
     LaserCalibResult,
     calibrate_laser_plane,
+    diff_laser_images,
+    extract_centerline_from_diff,
     load_laser_calib,
     save_laser_calib,
+    to_gray_image,
 )
 from .axis_calib import (
     AxisCalibResult,
@@ -62,6 +66,8 @@ __all__ = [
     "detect_chessboard_quality", "ChessboardDetection",
     "load_camera_calib", "save_camera_calib",
     "LaserCalibResult", "calibrate_laser_plane",
+    "DiffPairResult", "diff_laser_images", "extract_centerline_from_diff",
+    "to_gray_image",
     "load_laser_calib", "save_laser_calib",
     "AxisCalibResult", "calibrate_axis",
     "load_axis_calib", "save_axis_calib",

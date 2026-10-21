@@ -185,3 +185,81 @@ def test_axis_from_points(tmp_path):
     outcome = s.calibrate_axis_from_points(pts)
     assert outcome.ok, outcome.message
     assert (tmp_path / "calib_axis.npz").exists()
+
+
+# ---------------------------------------------------------------------------
+# 双图差分模式（激光标定 use_diff）
+# ---------------------------------------------------------------------------
+def _diff_session():
+    return _make_session(CalibMode.LASER, data={
+        "laser_calib.use_diff": True,
+        "calibration.camera_file": "config/calib_camera.npz",
+    })
+
+
+def _with_laser(img, y=None):
+    """在棋盘图上叠一条激光线（模拟"开激光"那一张）。"""
+    out = img.copy()
+    h, w = out.shape[:2]
+    yy = h // 2 if y is None else y
+    cv2.line(out, (w // 6, yy), (w * 5 // 6, yy), 255, 3)
+    return out
+
+
+def test_diff_pair_second_frame_accepted():
+    """同一位姿的"关激光 → 开激光"必须能配对（曾被误判为过于相似）。"""
+    s = _diff_session()
+    dark = _chessboard()
+    assert s.add_frame(dark).ok
+    v = s.add_frame(_with_laser(dark))
+    assert v.ok, v.reason
+    assert s.count == 2
+    assert "配对" in v.reason
+
+
+def test_diff_pair_requires_pose_change_between_pairs():
+    """不同对之间位姿必须不同：同姿态再起一对要被拒。"""
+    s = _diff_session()
+    dark = _chessboard()
+    assert s.add_frame(dark).ok
+    assert s.add_frame(_with_laser(dark)).ok
+    v = s.evaluate(dark)          # 下一对的关激光帧，姿态没变
+    assert not v.ok
+    assert "更换棋盘格姿态" in v.reason
+
+
+def test_diff_pair_rejects_board_moved_inside_pair():
+    """一对之内棋盘被碰动，第 2 张必须被拒。"""
+    s = _diff_session()
+    dark = _chessboard()
+    assert s.add_frame(dark).ok
+    moved = _with_laser(_chessboard(angle=8))
+    v = s.evaluate(moved)
+    assert not v.ok, v.reason
+    assert "碰动" in v.reason or "静止" in v.reason
+
+
+def test_diff_pair_accepts_multiple_pairs():
+    s = _diff_session()
+    for a in (0, 6, 12):
+        dark = _chessboard(angle=a)
+        assert s.add_frame(dark).ok
+        assert s.add_frame(_with_laser(dark)).ok
+    assert s.count == 6
+
+
+def test_diff_undo_restores_pose_reference():
+    """撤销某对第 1 张后，该位姿应能重新拍，不被判重复。"""
+    s = _diff_session()
+    dark = _chessboard()
+    assert s.add_frame(dark).ok
+    s.remove_last()               # 撤销该对第 1 张
+    assert s.count == 0
+    assert s.add_frame(dark).ok   # 同姿态可重来
+
+
+def test_use_diff_ignored_in_camera_mode():
+    """use_diff 只对激光模式生效，相机标定仍走原去重逻辑。"""
+    s = _make_session(CalibMode.CAMERA, data={"laser_calib.use_diff": True})
+    assert s.add_frame(_chessboard()).ok
+    assert not s.add_frame(_chessboard()).ok   # 依旧是重复
